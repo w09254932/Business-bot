@@ -143,45 +143,86 @@ async def save_owner_settings(owner_id: int, settings: dict):
     prune_memory()
 
 
+SETTING_LABELS = {
+    "capture_once": "استعادة الوسائط المؤقتة",
+    "capture_any_media": "التقاط الوسائط العادية عند الرد",
+    "rescue_photo": "الصور",
+    "rescue_video": "الفيديو",
+    "rescue_voice": "الرسائل الصوتية",
+    "rescue_audio": "ملفات الصوت",
+    "rescue_document": "الملفات",
+    "rescue_animation": "صور GIF المتحركة",
+    "rescue_video_note": "رسائل الفيديو الدائرية",
+    "rescue_sticker": "الملصقات",
+}
+
+
 def format_owner_settings(settings: dict) -> str:
-    labels = {
-        "capture_once": "استعادة الوسائط المؤقتة",
-        "capture_any_media": "التقاط أي وسيط عند الرد",
-        "rescue_photo": "الصور",
-        "rescue_video": "الفيديو",
-        "rescue_voice": "الرسائل الصوتية",
-        "rescue_audio": "ملفات الصوت",
-        "rescue_document": "الملفات",
-        "rescue_animation": "صور GIF المتحركة",
-        "rescue_video_note": "رسائل الفيديو الدائرية",
-        "rescue_sticker": "الملصقات",
-    }
+    lines = [
+        "⚙️ إعدادات البوت",
+        "",
+        "اضغط على الأزرار لتشغيل الميزات أو إيقافها.",
+        "",
+    ]
 
-    lines = ["⚙️ إعدادات البوت", ""]
-
-    for key, label in labels.items():
+    for key, label in SETTING_LABELS.items():
         state = "مفعّل ✅" if settings[key] else "متوقف ⛔"
         lines.append(f"{label}: {state}")
 
     lines.extend([
         "",
-        f"مدة الاحتفاظ: {settings['retention_hours']} ساعة",
-        "",
-        "أوامر التحكم:",
-        "/setting capture_once on أو off",
-        "/setting capture_any_media on أو off",
-        "/setting rescue_photo on أو off",
-        "/setting rescue_video on أو off",
-        "/setting rescue_voice on أو off",
-        "/setting rescue_audio on أو off",
-        "/setting rescue_document on أو off",
-        "/setting rescue_animation on أو off",
-        "/setting rescue_video_note on أو off",
-        "/setting rescue_sticker on أو off",
-        "/retention 1 أو 6 أو 12 أو 24 أو 72 أو 168",
+        f"⏳ مدة الاحتفاظ الحالية: {settings['retention_hours']} ساعة",
     ])
-
     return "\n".join(lines)
+
+
+def build_settings_keyboard(settings: dict):
+    def toggle(key):
+        enabled = settings[key]
+        return {
+            "text": (
+                f"{'✅' if enabled else '⛔'} "
+                f"{SETTING_LABELS[key]}"
+            ),
+            "callback_data": f"settings:toggle:{key}",
+        }
+
+    return {
+        "inline_keyboard": [
+            [toggle("capture_once")],
+            [toggle("capture_any_media")],
+            [toggle("rescue_photo"), toggle("rescue_video")],
+            [toggle("rescue_voice"), toggle("rescue_audio")],
+            [toggle("rescue_document"), toggle("rescue_animation")],
+            [toggle("rescue_video_note"), toggle("rescue_sticker")],
+            [{
+                "text": f"⏳ مدة الاحتفاظ: {settings['retention_hours']} ساعة",
+                "callback_data": "settings:retention",
+            }],
+        ]
+    }
+
+
+def build_retention_keyboard(settings: dict):
+    options = RETENTION_OPTIONS
+    rows = []
+
+    for index in range(0, len(options), 2):
+        row = []
+        for hours in options[index:index + 2]:
+            selected = settings["retention_hours"] == hours
+            row.append({
+                "text": f"{'✅ ' if selected else ''}{hours} ساعة",
+                "callback_data": f"settings:retention:{hours}",
+            })
+        rows.append(row)
+
+    rows.append([{
+        "text": "↩️ الرجوع للإعدادات",
+        "callback_data": "settings:home",
+    }])
+
+    return {"inline_keyboard": rows}
 
 
 async def process_private_message(message: dict):
@@ -215,9 +256,10 @@ async def process_private_message(message: dict):
     command = command_parts[0].split("@", 1)[0].lower()
 
     if command in ("/start", "/settings"):
-        await notify(chat_id, format_owner_settings(
-            await get_owner_settings(owner_id)
-        ))
+        await send_settings_menu(
+            chat_id,
+            await get_owner_settings(owner_id),
+        )
         return
 
     if command == "/setting":
@@ -483,6 +525,106 @@ async def send_saved_media(
         raise
 
 
+async def send_settings_menu(
+    chat_id: int,
+    settings: dict,
+    message_id: int | None = None,
+    retention_menu: bool = False,
+):
+    if retention_menu:
+        text = (
+            "⏳ اختر مدة الاحتفاظ بنسخ الرسائل.\n"
+            f"المدة الحالية: {settings['retention_hours']} ساعة"
+        )
+        keyboard = build_retention_keyboard(settings)
+    else:
+        text = format_owner_settings(settings)
+        keyboard = build_settings_keyboard(settings)
+
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "reply_markup": keyboard,
+    }
+
+    if message_id is not None:
+        payload["message_id"] = message_id
+        return await telegram("editMessageText", payload)
+
+    return await telegram("sendMessage", payload)
+
+
+async def process_callback_query(callback: dict):
+    callback_id = callback.get("id")
+    actor_id = (callback.get("from") or {}).get("id")
+    data = callback.get("data") or ""
+    message = callback.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
+
+    connection = next(
+        (
+            item for item in CONNECTIONS.values()
+            if item.get("enabled") and item.get("owner_id") == actor_id
+        ),
+        None,
+    )
+
+    if not connection:
+        if callback_id:
+            await telegram("answerCallbackQuery", {
+                "callback_query_id": callback_id,
+                "text": "هذه الأزرار ليست مخصصة لحسابك.",
+                "show_alert": True,
+            })
+        return
+
+    if callback_id:
+        # Acknowledge the button press to stop Telegram's loading indicator.
+        await telegram("answerCallbackQuery", {
+            "callback_query_id": callback_id,
+        })
+
+    if chat_id is None or message_id is None:
+        return
+
+    settings = dict(await get_owner_settings(actor_id))
+
+    if data == "settings:home":
+        await send_settings_menu(chat_id, settings, message_id)
+        return
+
+    if data == "settings:retention":
+        await send_settings_menu(
+            chat_id, settings, message_id, retention_menu=True
+        )
+        return
+
+    if data.startswith("settings:toggle:"):
+        key = data.split(":", 2)[2]
+        if key not in BOOLEAN_SETTINGS:
+            return
+
+        settings[key] = not settings[key]
+        await save_owner_settings(actor_id, settings)
+        await send_settings_menu(chat_id, settings, message_id)
+        return
+
+    if data.startswith("settings:retention:"):
+        try:
+            hours = int(data.split(":", 2)[2])
+        except ValueError:
+            return
+
+        if hours not in RETENTION_OPTIONS:
+            return
+
+        settings["retention_hours"] = hours
+        await save_owner_settings(actor_id, settings)
+        await send_settings_menu(chat_id, settings, message_id)
+        return
+
+
 def save_business_connection(data: dict):
     connection_id = data.get("id")
     user = data.get("user") or {}
@@ -529,6 +671,14 @@ async def process_business_message(message: dict, edited: bool = False):
         original_sender = (original.get("from") or {}).get("id")
 
         if original_sender != owner_id:
+            # Ignore normal text replies; rescue is only for supported media.
+            supported_media = (
+                "photo", "video", "voice", "video_note",
+                "audio", "document", "animation", "sticker",
+            )
+            if not any(original.get(field) for field in supported_media):
+                return
+
             original_chat_id = (original.get("chat") or {}).get("id")
             original_message_id = original.get("message_id")
             original_snapshot = None
@@ -765,6 +915,8 @@ async def handle_update(update: dict):
         )
     elif "deleted_business_messages" in update:
         await process_deleted_messages(update["deleted_business_messages"])
+    elif "callback_query" in update:
+        await process_callback_query(update["callback_query"])
     elif "message" in update:
         await process_private_message(update["message"])
 
@@ -785,6 +937,7 @@ async def register_webhook():
             "secret_token": WEBHOOK_SECRET,
             "allowed_updates": [
                 "message",
+                "callback_query",
                 "business_connection",
                 "business_message",
                 "edited_business_message",

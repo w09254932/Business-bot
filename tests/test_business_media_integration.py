@@ -47,7 +47,7 @@ def test_owner_reply_resends_accessible_photo(monkeypatch):
     assert any("بنجاح" in text for _, text in notifications)
 
 
-def test_owner_reply_without_media(monkeypatch):
+def test_owner_text_reply_is_ignored(monkeypatch):
     setup_connection(monkeypatch)
 
     notifications = []
@@ -73,7 +73,7 @@ def test_owner_reply_without_media(monkeypatch):
 
     asyncio.run(scenario())
 
-    assert any("لم تصل بيانات وسيط" in text for text in notifications)
+    assert notifications == []
 
 
 def test_incoming_customer_photo_still_works(monkeypatch):
