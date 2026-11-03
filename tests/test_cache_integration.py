@@ -110,6 +110,7 @@ def test_incoming_ordinary_photo_is_cached(monkeypatch):
     forwarded = []
 
     monkeypatch.setattr(main, "cache_enabled", lambda: True)
+    monkeypatch.setattr(main, "BOT_TOKEN", "test-token")
     monkeypatch.setattr(main, "is_one_time", lambda message: False)
 
     async def fake_cache(*args, **kwargs):
@@ -150,7 +151,7 @@ def test_incoming_ordinary_photo_is_cached(monkeypatch):
         main.forget_snapshot(*key)
 
 
-def test_marked_one_time_media_is_not_cached(monkeypatch):
+def test_marked_one_time_media_is_cached_on_arrival(monkeypatch):
     connection_id = "one-time-cache-test"
     owner_id = 92001
     chat_id = 92002
@@ -173,6 +174,7 @@ def test_marked_one_time_media_is_not_cached(monkeypatch):
 
     cache_calls = []
     monkeypatch.setattr(main, "cache_enabled", lambda: True)
+    monkeypatch.setattr(main, "BOT_TOKEN", "test-token")
 
     async def fake_cache(*args, **kwargs):
         cache_calls.append(args)
@@ -200,8 +202,10 @@ def test_marked_one_time_media_is_not_cached(monkeypatch):
             "view_once": True,
         }))
 
-        assert cache_calls == []
+        assert cache_calls == [
+            ("test-token", "temporary-photo", None, None)
+        ]
         snapshot = main.get_snapshot(*key)
-        assert snapshot["file_path"] is None
+        assert snapshot["file_path"] == "/cache/temporary.jpg"
     finally:
         main.forget_snapshot(*key)

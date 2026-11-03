@@ -338,6 +338,77 @@ def forget_snapshot(connection_id: str, chat_id: int, message_id: int):
         delete_cached_media(snapshot.get("file_path"))
 
 
+
+async def get_snapshot_with_firestore(
+    connection_id: str,
+    chat_id: int,
+    message_id: int,
+    connection: dict,
+):
+    # RAM is the fast path.
+    snapshot = get_snapshot(connection_id, chat_id, message_id)
+    if snapshot:
+        return snapshot
+
+    # Firestore is the persistent fallback.
+    saved = await firestore_store.load_message_snapshot(
+        connection["owner_id"],
+        connection_id,
+        chat_id,
+        message_id,
+    )
+
+    if not saved:
+        return None
+
+    saved_at = int(saved.get("saved_at_unix") or time.time())
+    age = max(0, time.time() - saved_at)
+
+    snapshot = {
+        "text": saved.get("text") or "",
+        "media_type": saved.get("media_type"),
+        "file_id": saved.get("file_id"),
+        "file_unique_id": saved.get("file_unique_id"),
+        "file_path": None,
+        "saved_at": time.monotonic() - age,
+    }
+
+    key = (connection_id, chat_id, message_id)
+    SNAPSHOTS[key] = snapshot
+    SNAPSHOTS.move_to_end(key)
+    prune_memory()
+
+    return SNAPSHOTS.get(key)
+
+
+async def persist_message_snapshot(
+    owner_id: int,
+    connection_id: str,
+    message: dict,
+    snapshot: dict,
+):
+    chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
+
+    if chat_id is None or message_id is None:
+        return
+
+    await firestore_store.persist_message_snapshot(
+        owner_id,
+        connection_id,
+        {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "sender_id": (message.get("from") or {}).get("id"),
+            "text": snapshot.get("text") or "",
+            "media_type": snapshot.get("media_type"),
+            "file_id": snapshot.get("file_id"),
+            "file_unique_id": snapshot.get("file_unique_id"),
+            "saved_at_unix": int(time.time()),
+        },
+    )
+
+
 async def telegram(method: str, payload: dict):
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not configured")
@@ -463,10 +534,11 @@ async def process_business_message(message: dict, edited: bool = False):
             original_snapshot = None
 
             if original_chat_id is not None and original_message_id is not None:
-                original_snapshot = get_snapshot(
+                original_snapshot = await get_snapshot_with_firestore(
                     connection_id,
                     original_chat_id,
                     original_message_id,
+                    connection,
                 )
 
             async def send_reply_media(chat_id, media_type, file_id):
@@ -478,6 +550,20 @@ async def process_business_message(message: dict, edited: bool = False):
                     and original_snapshot.get("file_id") == file_id
                 ):
                     cached_path = original_snapshot.get("file_path")
+
+                # If the original snapshot has no cached file, attempt
+                # getFile while Telegram still exposes the reply media.
+                if not cached_path and cache_enabled():
+                    metadata = media_metadata(original) or {}
+                    cached_path = await cache_telegram_media(
+                        BOT_TOKEN,
+                        file_id,
+                        metadata.get("file_unique_id"),
+                        metadata.get("file_size"),
+                    )
+
+                    if cached_path and original_snapshot is not None:
+                        original_snapshot["file_path"] = cached_path
 
                 if cached_path:
                     return await send_saved_media(
@@ -528,7 +614,12 @@ async def process_business_message(message: dict, edited: bool = False):
     if chat_id is None or message_id is None:
         return
 
-    old = get_snapshot(connection_id, chat_id, message_id) if edited else None
+    old = (
+        await get_snapshot_with_firestore(
+            connection_id, chat_id, message_id, connection
+        )
+        if edited else None
+    )
 
     text_content = message.get("text") or message.get("caption") or ""
     media_type, file_id, _ = extract_media(message)
@@ -541,7 +632,6 @@ async def process_business_message(message: dict, edited: bool = False):
         and media_type
         and file_id
         and cache_enabled()
-        and not is_one_time(message)
     ):
         metadata = media_metadata(message) or {}
 
@@ -557,8 +647,16 @@ async def process_business_message(message: dict, edited: bool = False):
         except Exception:
             log.warning("Media cache failed")
 
+    if snapshot is not None:
+        await persist_message_snapshot(
+            owner_id,
+            connection_id,
+            message,
+            snapshot,
+        )
+
     if edited:
-        old_text = old["text"] if old else "(النسخة السابقة غير متوفرة في الذاكرة)"
+        old_text = old["text"] if old else "(النسخة السابقة غير متوفرة)"
         await notify(
             owner_chat_id,
             "✏️ تم تعديل رسالة.\n"
@@ -603,7 +701,12 @@ async def process_deleted_messages(data: dict):
     owner_chat_id = connection["owner_chat_id"]
 
     for message_id in message_ids:
-        snapshot = get_snapshot(connection_id, chat_id, message_id)
+        snapshot = await get_snapshot_with_firestore(
+            connection_id,
+            chat_id,
+            message_id,
+            connection,
+        )
 
         if not snapshot:
             await notify(
@@ -639,6 +742,12 @@ async def process_deleted_messages(data: dict):
             except Exception:
                 log.error("Deleted media resend failed")
 
+        await firestore_store.delete_message_snapshot(
+            connection["owner_id"],
+            connection_id,
+            chat_id,
+            message_id,
+        )
         forget_snapshot(connection_id, chat_id, message_id)
 
 
@@ -689,8 +798,43 @@ async def register_webhook():
 
 
 async def memory_janitor():
+    last_firestore_cleanup = 0.0
+
     while True:
         prune_memory()
+
+        now = time.monotonic()
+
+        if (
+            firestore_store.is_configured()
+            and now - last_firestore_cleanup >= 3600
+        ):
+            visited = set()
+
+            for connection_id, connection in list(CONNECTIONS.items()):
+                owner_id = connection.get("owner_id")
+
+                if not owner_id or (owner_id, connection_id) in visited:
+                    continue
+
+                visited.add((owner_id, connection_id))
+
+                settings = USER_SETTINGS.get(
+                    owner_id,
+                    DEFAULT_USER_SETTINGS,
+                )
+
+                try:
+                    await firestore_store.prune_message_snapshots(
+                        owner_id,
+                        connection_id,
+                        settings.get("retention_hours", 6),
+                    )
+                except Exception:
+                    log.error("Persistent snapshot cleanup failed")
+
+            last_firestore_cleanup = now
+
         await asyncio.sleep(MEMORY_CLEANUP_INTERVAL_SECONDS)
 
 

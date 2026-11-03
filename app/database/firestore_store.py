@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 
 
 ENV_KEY = "FIREBASE_SERVICE_ACCOUNT_JSON"
@@ -98,6 +99,22 @@ def _delete_connection_sync(owner_id, connection_id):
         .collection(COLLECTION_NAME)
         .document(connection_id)
     )
+
+    # Firestore does not automatically delete subcollections.
+    messages = reference.collection("messages")
+
+    while True:
+        documents = list(messages.limit(400).stream())
+
+        if not documents:
+            break
+
+        batch = db.batch()
+
+        for document in documents:
+            batch.delete(document.reference)
+
+        batch.commit()
 
     reference.delete()
 
@@ -200,4 +217,278 @@ async def persist_user_settings(owner_id, settings):
         _write_user_settings_sync,
         int(owner_id),
         safe_settings,
+    )
+
+
+
+# ---------------------------------------------------------------------------
+# Persistent message snapshots
+# Path:
+# users/{owner_id}/business_connections/{connection_id}/messages/{chat}_{msg}
+# ---------------------------------------------------------------------------
+
+def _message_reference(
+    db,
+    owner_id,
+    connection_id,
+    chat_id,
+    message_id,
+):
+    document_id = f"{int(chat_id)}_{int(message_id)}"
+
+    return (
+        db.collection("users")
+        .document(str(int(owner_id)))
+        .collection(COLLECTION_NAME)
+        .document(str(connection_id))
+        .collection("messages")
+        .document(document_id)
+    )
+
+
+def _write_message_snapshot_sync(
+    owner_id,
+    connection_id,
+    snapshot,
+):
+    from firebase_admin import firestore
+
+    db = _get_db()
+
+    reference = _message_reference(
+        db,
+        owner_id,
+        connection_id,
+        snapshot["chat_id"],
+        snapshot["message_id"],
+    )
+
+    data = {
+        "owner_id": int(owner_id),
+        "connection_id": str(connection_id),
+        "chat_id": int(snapshot["chat_id"]),
+        "message_id": int(snapshot["message_id"]),
+        "sender_id": snapshot.get("sender_id"),
+        "text": str(snapshot.get("text") or "")[:4096],
+        "media_type": snapshot.get("media_type"),
+        "file_id": snapshot.get("file_id"),
+        "file_unique_id": snapshot.get("file_unique_id"),
+        "saved_at_unix": int(
+            snapshot.get("saved_at_unix") or time.time()
+        ),
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }
+
+    reference.set(data, merge=True)
+
+
+def _read_message_snapshot_sync(
+    owner_id,
+    connection_id,
+    chat_id,
+    message_id,
+):
+    db = _get_db()
+
+    reference = _message_reference(
+        db,
+        owner_id,
+        connection_id,
+        chat_id,
+        message_id,
+    )
+
+    document = reference.get()
+
+    if not document.exists:
+        return None
+
+    data = document.to_dict() or {}
+    data["file_path"] = None
+
+    return data
+
+
+def _pop_message_snapshot_sync(
+    owner_id,
+    connection_id,
+    chat_id,
+    message_id,
+):
+    db = _get_db()
+
+    reference = _message_reference(
+        db,
+        owner_id,
+        connection_id,
+        chat_id,
+        message_id,
+    )
+
+    document = reference.get()
+
+    if not document.exists:
+        return None
+
+    data = document.to_dict() or {}
+    reference.delete()
+    data["file_path"] = None
+
+    return data
+
+
+def _delete_message_snapshot_sync(
+    owner_id,
+    connection_id,
+    chat_id,
+    message_id,
+):
+    db = _get_db()
+
+    reference = _message_reference(
+        db,
+        owner_id,
+        connection_id,
+        chat_id,
+        message_id,
+    )
+
+    reference.delete()
+
+
+def _prune_message_snapshots_sync(
+    owner_id,
+    connection_id,
+    retention_hours,
+):
+    db = _get_db()
+
+    cutoff = int(time.time()) - int(retention_hours) * 3600
+
+    collection = (
+        db.collection("users")
+        .document(str(int(owner_id)))
+        .collection(COLLECTION_NAME)
+        .document(str(connection_id))
+        .collection("messages")
+    )
+
+    removed = 0
+
+    # Bounded batches keep each cleanup cycle manageable.
+    for _ in range(10):
+        documents = list(
+            collection
+            .where("saved_at_unix", "<", cutoff)
+            .limit(400)
+            .stream()
+        )
+
+        if not documents:
+            break
+
+        batch = db.batch()
+
+        for document in documents:
+            batch.delete(document.reference)
+
+        batch.commit()
+        removed += len(documents)
+
+        if len(documents) < 400:
+            break
+
+    return removed
+
+
+async def persist_message_snapshot(
+    owner_id,
+    connection_id,
+    snapshot,
+):
+    if not is_configured():
+        return False
+
+    required = ("chat_id", "message_id")
+
+    if any(snapshot.get(key) is None for key in required):
+        raise ValueError("Incomplete message snapshot")
+
+    await asyncio.to_thread(
+        _write_message_snapshot_sync,
+        owner_id,
+        connection_id,
+        snapshot,
+    )
+
+    return True
+
+
+async def load_message_snapshot(
+    owner_id,
+    connection_id,
+    chat_id,
+    message_id,
+):
+    if not is_configured():
+        return None
+
+    return await asyncio.to_thread(
+        _read_message_snapshot_sync,
+        owner_id,
+        connection_id,
+        chat_id,
+        message_id,
+    )
+
+
+async def pop_message_snapshot(
+    owner_id,
+    connection_id,
+    chat_id,
+    message_id,
+):
+    if not is_configured():
+        return None
+
+    return await asyncio.to_thread(
+        _pop_message_snapshot_sync,
+        owner_id,
+        connection_id,
+        chat_id,
+        message_id,
+    )
+
+
+async def delete_message_snapshot(
+    owner_id,
+    connection_id,
+    chat_id,
+    message_id,
+):
+    if not is_configured():
+        return
+
+    await asyncio.to_thread(
+        _delete_message_snapshot_sync,
+        owner_id,
+        connection_id,
+        chat_id,
+        message_id,
+    )
+
+
+async def prune_message_snapshots(
+    owner_id,
+    connection_id,
+    retention_hours,
+):
+    if not is_configured():
+        return 0
+
+    return await asyncio.to_thread(
+        _prune_message_snapshots_sync,
+        owner_id,
+        connection_id,
+        retention_hours,
     )

@@ -92,3 +92,125 @@ def test_invalid_connection_data_is_rejected(monkeypatch):
         pass
     else:
         raise AssertionError("Invalid connection data was accepted")
+
+
+def test_persist_message_snapshot_calls_store(monkeypatch):
+    monkeypatch.setenv("FIREBASE_SERVICE_ACCOUNT_JSON", "{}")
+    calls = []
+
+    def fake_write(owner_id, connection_id, snapshot):
+        calls.append((owner_id, connection_id, snapshot.copy()))
+
+    monkeypatch.setattr(
+        firestore_store,
+        "_write_message_snapshot_sync",
+        fake_write,
+    )
+
+    snapshot = {
+        "chat_id": 22,
+        "message_id": 33,
+        "text": "رسالة محفوظة",
+        "media_type": "photo",
+        "file_id": "photo-file",
+    }
+
+    result = asyncio.run(
+        firestore_store.persist_message_snapshot(
+            11,
+            "connection-A",
+            snapshot,
+        )
+    )
+
+    assert result is True
+    assert calls[0][0:2] == (11, "connection-A")
+    assert calls[0][2]["file_id"] == "photo-file"
+
+
+def test_persist_message_snapshot_requires_ids(monkeypatch):
+    monkeypatch.setenv("FIREBASE_SERVICE_ACCOUNT_JSON", "{}")
+
+    try:
+        asyncio.run(
+            firestore_store.persist_message_snapshot(
+                11,
+                "connection-A",
+                {"text": "missing identifiers"},
+            )
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Incomplete snapshot was accepted")
+
+
+def test_load_message_snapshot(monkeypatch):
+    monkeypatch.setenv("FIREBASE_SERVICE_ACCOUNT_JSON", "{}")
+
+    expected = {
+        "owner_id": 11,
+        "chat_id": 22,
+        "message_id": 33,
+        "text": "persisted",
+    }
+
+    monkeypatch.setattr(
+        firestore_store,
+        "_read_message_snapshot_sync",
+        lambda *args: expected,
+    )
+
+    result = asyncio.run(
+        firestore_store.load_message_snapshot(
+            11,
+            "connection-A",
+            22,
+            33,
+        )
+    )
+
+    assert result["text"] == "persisted"
+
+
+def test_pop_message_snapshot(monkeypatch):
+    monkeypatch.setenv("FIREBASE_SERVICE_ACCOUNT_JSON", "{}")
+
+    expected = {"text": "deleted snapshot"}
+
+    monkeypatch.setattr(
+        firestore_store,
+        "_pop_message_snapshot_sync",
+        lambda *args: expected,
+    )
+
+    result = asyncio.run(
+        firestore_store.pop_message_snapshot(
+            11,
+            "connection-A",
+            22,
+            33,
+        )
+    )
+
+    assert result == expected
+
+
+def test_prune_message_snapshots(monkeypatch):
+    monkeypatch.setenv("FIREBASE_SERVICE_ACCOUNT_JSON", "{}")
+
+    monkeypatch.setattr(
+        firestore_store,
+        "_prune_message_snapshots_sync",
+        lambda *args: 7,
+    )
+
+    result = asyncio.run(
+        firestore_store.prune_message_snapshots(
+            11,
+            "connection-A",
+            6,
+        )
+    )
+
+    assert result == 7
