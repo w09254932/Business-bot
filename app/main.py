@@ -132,11 +132,22 @@ async def telegram(method: str, payload: dict):
 
     async with httpx.AsyncClient(timeout=35) as client:
         response = await client.post(f"{API}/{method}", json=payload)
-        response.raise_for_status()
-        result = response.json()
 
-    if not result.get("ok"):
-        raise RuntimeError(f"Telegram API {method} failed")
+        try:
+            result = response.json()
+        except ValueError:
+            raise RuntimeError(
+                f"Telegram API {method} returned HTTP {response.status_code} "
+                "with an unreadable response"
+            )
+
+    if not result.get("ok") or response.status_code >= 400:
+        description = result.get("description", "Unknown Telegram API error")
+        error_code = result.get("error_code", response.status_code)
+        raise RuntimeError(
+            f"Telegram API {method} failed: "
+            f"{error_code} - {description}"
+        )
 
     return result.get("result")
 
