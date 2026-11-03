@@ -146,6 +146,8 @@ async def save_owner_settings(owner_id: int, settings: dict):
 SETTING_LABELS = {
     "capture_once": "استعادة الوسائط المؤقتة",
     "capture_any_media": "التقاط الوسائط العادية عند الرد",
+    "notify_new_messages": "إشعارات الرسائل الجديدة",
+    "auto_forward_media": "إعادة إرسال المرفقات تلقائيًا",
     "rescue_photo": "الصور",
     "rescue_video": "الفيديو",
     "rescue_voice": "الرسائل الصوتية",
@@ -191,6 +193,8 @@ def build_settings_keyboard(settings: dict):
         "inline_keyboard": [
             [toggle("capture_once")],
             [toggle("capture_any_media")],
+            [toggle("notify_new_messages")],
+            [toggle("auto_forward_media")],
             [toggle("rescue_photo"), toggle("rescue_video")],
             [toggle("rescue_voice"), toggle("rescue_audio")],
             [toggle("rescue_document"), toggle("rescue_animation")],
@@ -883,6 +887,7 @@ async def process_business_message(message: dict, edited: bool = False):
             snapshot,
         )
 
+    # Edits remain important notifications.
     if edited:
         old_text = old["text"] if old else "(النسخة السابقة غير متوفرة)"
         await notify(
@@ -891,7 +896,7 @@ async def process_business_message(message: dict, edited: bool = False):
             f"النص السابق: {old_text[:1200]}\n"
             f"النص الحالي: {text_content[:1200] or '(لا يوجد نص)'}"
         )
-    else:
+    elif owner_settings.get("notify_new_messages", False):
         await notify(
             owner_chat_id,
             "📩 رسالة جديدة.\n"
@@ -899,8 +904,14 @@ async def process_business_message(message: dict, edited: bool = False):
             f"نوع الوسيط: {media_type or 'لا يوجد'}"
         )
 
-    # Forward accessible media to the owner without downloading or archiving it.
-    if media_type and file_id:
+    # Automatic media forwarding is independent from silent persistence.
+    # Per-media switches are also respected.
+    if (
+        media_type
+        and file_id
+        and owner_settings.get("auto_forward_media", False)
+        and owner_settings.get(f"rescue_{media_type}", True)
+    ):
         try:
             cached_path = snapshot.get("file_path") if snapshot else None
 

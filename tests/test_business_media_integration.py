@@ -82,6 +82,13 @@ def test_owner_text_reply_is_ignored(monkeypatch):
 
 def test_incoming_customer_photo_still_works(monkeypatch):
     setup_connection(monkeypatch)
+    monkeypatch.setitem(
+        main.USER_SETTINGS,
+        99,
+        main.DEFAULT_USER_SETTINGS.copy(),
+    )
+    main.USER_SETTINGS[99]["notify_new_messages"] = True
+    main.USER_SETTINGS[99]["auto_forward_media"] = True
 
     sent = []
     notifications = []

@@ -3,6 +3,8 @@
 DEFAULT_USER_SETTINGS = {
     "capture_once": True,
     "capture_any_media": False,
+    "notify_new_messages": False,
+    "auto_forward_media": False,
     "rescue_photo": True,
     "rescue_video": True,
     "rescue_voice": True,

@@ -105,6 +105,7 @@ def test_incoming_ordinary_photo_is_cached(monkeypatch):
         owner_id,
         main.DEFAULT_USER_SETTINGS.copy(),
     )
+    main.USER_SETTINGS[owner_id]["auto_forward_media"] = True
 
     cache_calls = []
     forwarded = []
