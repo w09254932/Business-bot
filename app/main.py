@@ -9,6 +9,8 @@ from typing import Optional
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
+from app.media.one_time_rescue import rescue_reply_media
+from app.database import firestore_store
 
 load_dotenv()
 
@@ -65,10 +67,14 @@ def extract_media(message: dict):
 def prune_memory():
     now = time.monotonic()
 
-    while SNAPSHOTS:
-        key, value = next(iter(SNAPSHOTS.items()))
-        if now - value["saved_at"] <= SNAPSHOT_TTL:
-            break
+    # Remove every expired snapshot, regardless of LRU access order.
+    expired_keys = [
+        key
+        for key, value in SNAPSHOTS.items()
+        if now - value["saved_at"] > SNAPSHOT_TTL
+    ]
+
+    for key in expired_keys:
         SNAPSHOTS.pop(key, None)
 
     while len(SNAPSHOTS) > MAX_SNAPSHOTS:
@@ -159,7 +165,7 @@ async def notify(owner_chat_id: int, text: str):
             "text": text[:4000],
         })
     except Exception:
-        log.exception("Notification delivery failed")
+        log.error("Notification delivery failed")
 
 
 async def send_saved_media(
@@ -228,32 +234,35 @@ async def process_business_message(message: dict, edited: bool = False):
     chat_id = (message.get("chat") or {}).get("id")
     message_id = message.get("message_id")
 
-    # Owner reply: try to resend media only if Telegram exposed it.
+    # Owner reply: use the isolated media rescue module.
     if sender_id == owner_id:
         original = message.get("reply_to_message") or {}
         original_sender = (original.get("from") or {}).get("id")
-        media_type, file_id, _ = extract_media(original)
 
-        if (
-            media_type
-            and file_id
-            and original_sender != owner_id
-        ):
-            try:
-                await send_saved_media(owner_chat_id, media_type, file_id)
+        if original_sender != owner_id:
+            result = await rescue_reply_media(
+                message,
+                owner_chat_id,
+                send_saved_media,
+            )
+
+            if result["ok"]:
                 await notify(
                     owner_chat_id,
-                    "وصلت وسائط من الرسالة التي رددت عليها، "
-                    "وتمت محاولة إعادة إرسالها."
+                    "تم العثور على الوسيط في الرسالة التي رددت عليها "
+                    "وإعادة إرساله بنجاح."
                 )
-            except Exception:
-                log.exception("Reply media resend failed")
+            elif result["reason"] == "media_unavailable":
                 await notify(
                     owner_chat_id,
-                    "تعذرت إعادة إرسال الوسيط الموجود في الرسالة التي رددت عليها."
+                    "لم تصل بيانات وسيط قابلة لإعادة الإرسال من Telegram "
+                    "في الرسالة التي رددت عليها."
                 )
-        else:
-            log.info("Owner reply contains no accessible third-party media")
+            else:
+                await notify(
+                    owner_chat_id,
+                    "وصلت بيانات الوسيط، لكن Telegram رفض إعادة إرساله."
+                )
         return
 
     if chat_id is None or message_id is None:
@@ -287,7 +296,7 @@ async def process_business_message(message: dict, edited: bool = False):
         try:
             await send_saved_media(owner_chat_id, media_type, file_id)
         except Exception:
-            log.exception("Incoming media forwarding failed")
+            log.error("Incoming media forwarding failed")
 
 
 async def process_deleted_messages(data: dict):
@@ -327,14 +336,16 @@ async def process_deleted_messages(data: dict):
                     snapshot["file_id"],
                 )
             except Exception:
-                log.exception("Deleted media resend failed")
+                log.error("Deleted media resend failed")
 
         forget_snapshot(connection_id, chat_id, message_id)
 
 
 async def handle_update(update: dict):
     if "business_connection" in update:
-        save_business_connection(update["business_connection"])
+        data = update["business_connection"]
+        save_business_connection(data)
+        await firestore_store.persist_business_connection(data)
     elif "business_message" in update:
         await process_business_message(update["business_message"])
     elif "edited_business_message" in update:
@@ -370,11 +381,20 @@ async def register_webhook():
         })
         log.info("Telegram webhook registered")
     except Exception:
-        log.exception("Webhook registration failed")
+        log.error("Webhook registration failed")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    saved_connections = await firestore_store.load_connections()
+
+    if saved_connections is not None:
+        CONNECTIONS.clear()
+        CONNECTIONS.update(saved_connections)
+        log.info("Business connections restored from Firestore")
+    else:
+        log.info("Storage mode: RAM only")
+
     await register_webhook()
     yield
 
@@ -390,7 +410,7 @@ app = FastAPI(
 async def root():
     return {
         "service": "Telegram Business Monitor",
-        "storage": "RAM only",
+        "storage": firestore_store.storage_mode(),
         "status": "running",
     }
 
@@ -400,7 +420,7 @@ async def health():
     prune_memory()
     return {
         "ok": True,
-        "storage": "RAM only",
+        "storage": firestore_store.storage_mode(),
         "active_connections": len(CONNECTIONS),
         "temporary_snapshots": len(SNAPSHOTS),
     }
@@ -430,7 +450,7 @@ async def telegram_webhook(request: Request):
         await handle_update(update)
     except Exception:
         PROCESSED_UPDATES.pop(update_id, None)
-        log.exception("Update processing failed")
+        log.error("Update processing failed")
         raise HTTPException(status_code=500, detail="Update processing failed")
 
     return {"ok": True, "processed": True}

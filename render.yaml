@@ -11,3 +11,6 @@ services:
         sync: false
       - key: WEBHOOK_SECRET
         generateValue: true
+
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
