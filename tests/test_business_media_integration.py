@@ -17,6 +17,10 @@ def setup_connection(monkeypatch):
 
 def test_owner_reply_resends_accessible_photo(monkeypatch):
     setup_connection(monkeypatch)
+    monkeypatch.setitem(
+        main.USER_SETTINGS, 99, main.DEFAULT_USER_SETTINGS.copy()
+    )
+    monkeypatch.setattr(main, "cache_enabled", lambda: False)
 
     sent = []
     notifications = []
@@ -34,10 +38,10 @@ def test_owner_reply_resends_accessible_photo(monkeypatch):
         await main.process_business_message({
             "business_connection_id": "test-connection",
             "from": {"id": 99},
+            "text": chr(0x064e) + " حلوة الصورة",
             "reply_to_message": {
                 "from": {"id": 7},
                 "photo": [{"file_id": "photo-123"}],
-                "view_once": True,
             },
         })
 

@@ -665,8 +665,12 @@ async def process_business_message(message: dict, edited: bool = False):
     chat_id = (message.get("chat") or {}).get("id")
     message_id = message.get("message_id")
 
-    # Owner reply: use the isolated media rescue module.
+    # Only replies starting with Fatha trigger media rescue.
     if sender_id == owner_id:
+        reply_content = message.get("text") or message.get("caption") or ""
+        if not reply_content.startswith(chr(0x064e)):
+            return
+
         original = message.get("reply_to_message") or {}
         original_sender = (original.get("from") or {}).get("id")
 
@@ -724,11 +728,16 @@ async def process_business_message(message: dict, edited: bool = False):
                     chat_id, media_type, file_id
                 )
 
+            # The Fatha prefix is explicit permission to rescue
+            # this specific reply, including ordinary media.
+            rescue_settings = dict(owner_settings)
+            rescue_settings["capture_any_media"] = True
+
             result = await rescue_reply_media(
                 message,
                 owner_chat_id,
                 send_reply_media,
-                owner_settings,
+                rescue_settings,
             )
 
             if result["ok"]:
