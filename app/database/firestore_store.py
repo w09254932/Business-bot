@@ -65,15 +65,37 @@ def _load_connections_sync():
             "owner_id": owner_id,
             "owner_chat_id": owner_chat_id,
             "enabled": True,
+            "rights": data.get("rights") or {},
+            "business_user": data.get("business_user") or {},
+            "connected_at": data.get("connected_at"),
         }
 
     return records
 
-
-def _write_connection_sync(owner_id, connection_id, owner_chat_id):
+def _write_connection_sync(
+    owner_id,
+    connection_id,
+    owner_chat_id,
+    connection_data=None,
+):
     from firebase_admin import firestore
 
     db = _get_db()
+    connection_data = connection_data or {}
+    user = connection_data.get("user") or {}
+    raw_rights = connection_data.get("rights") or {}
+
+    safe_rights = {
+        key: value
+        for key, value in raw_rights.items()
+        if isinstance(value, bool)
+    }
+
+    business_user = {
+        key: user[key]
+        for key in ("id", "first_name", "last_name", "username")
+        if key in user
+    }
 
     reference = (
         db.collection("users")
@@ -86,9 +108,11 @@ def _write_connection_sync(owner_id, connection_id, owner_chat_id):
         "owner_id": int(owner_id),
         "owner_chat_id": int(owner_chat_id),
         "enabled": True,
+        "rights": safe_rights,
+        "business_user": business_user,
+        "connected_at": int(connection_data.get("date") or time.time()),
         "updated_at": firestore.SERVER_TIMESTAMP,
     }, merge=True)
-
 
 def _delete_connection_sync(owner_id, connection_id):
     db = _get_db()
@@ -151,8 +175,8 @@ async def persist_business_connection(data: dict):
         owner_id,
         connection_id,
         owner_chat_id,
+        data,
     )
-
 
 def _load_user_settings_sync(owner_ids):
     db = _get_db()

@@ -15,8 +15,18 @@ def test_persist_enabled_connection(monkeypatch):
     monkeypatch.setenv("FIREBASE_SERVICE_ACCOUNT_JSON", "{}")
     calls = []
 
-    def fake_write(owner_id, connection_id, owner_chat_id):
-        calls.append((owner_id, connection_id, owner_chat_id))
+    def fake_write(
+        owner_id,
+        connection_id,
+        owner_chat_id,
+        connection_data=None,
+    ):
+        calls.append((
+            owner_id,
+            connection_id,
+            owner_chat_id,
+            connection_data,
+        ))
 
     monkeypatch.setattr(
         firestore_store,
@@ -28,10 +38,17 @@ def test_persist_enabled_connection(monkeypatch):
         "id": "connection-A",
         "user": {"id": 1001},
         "user_chat_id": 2001,
+        "date": 1770000000,
+        "rights": {
+            "can_reply": True,
+            "can_read_messages": True,
+        },
         "is_enabled": True,
     }))
 
-    assert calls == [(1001, "connection-A", 2001)]
+    assert calls[0][:3] == (1001, "connection-A", 2001)
+    assert calls[0][3]["rights"]["can_reply"] is True
+    assert calls[0][3]["date"] == 1770000000
 
 
 def test_persist_disabled_connection(monkeypatch):

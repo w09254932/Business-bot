@@ -199,6 +199,10 @@ def build_settings_keyboard(settings: dict):
                 "text": f"⏳ مدة الاحتفاظ: {settings['retention_hours']} ساعة",
                 "callback_data": "settings:retention",
             }],
+            [{
+                "text": "🔗 إدارة اتصال Telegram Business",
+                "url": "tg://settings/business",
+            }],
         ]
     }
 
@@ -225,6 +229,38 @@ def build_retention_keyboard(settings: dict):
     return {"inline_keyboard": rows}
 
 
+def build_welcome_keyboard():
+    return {
+        "inline_keyboard": [[
+            {
+                "text": "🔗 توصيل حساب Telegram Business",
+                "url": "tg://settings/business",
+            }
+        ]]
+    }
+
+
+async def send_welcome_menu(chat_id: int):
+    lines = [
+        "مرحبًا بك في بوت إدارة Telegram Business 🤖",
+        "",
+        "للبدء، اربط حساب Telegram Business الخاص بك.",
+        "",
+        "1. اضغط على زر توصيل الحساب.",
+        "2. افتح قسم Chatbots داخل إعدادات الأعمال.",
+        "3. اختر هذا البوت وحدد المحادثات والصلاحيات.",
+        "4. وافق على التوصيل وارجع إلى هذه المحادثة.",
+        "",
+        "بعد وصول تأكيد Telegram سيعرض البوت إعدادات حسابك الخاصة.",
+    ]
+
+    return await telegram("sendMessage", {
+        "chat_id": chat_id,
+        "text": chr(10).join(lines),
+        "reply_markup": build_welcome_keyboard(),
+    })
+
+
 async def process_private_message(message: dict):
     chat = message.get("chat") or {}
     sender = message.get("from") or {}
@@ -239,6 +275,10 @@ async def process_private_message(message: dict):
     if not owner_id or not chat_id or not text_content.startswith("/"):
         return
 
+    # The owner can open the bot before connecting a Business account.
+    command_parts = text_content.strip().split()
+    command = command_parts[0].split("@", 1)[0].lower()
+
     connection = next(
         (
             item
@@ -248,18 +288,17 @@ async def process_private_message(message: dict):
         None,
     )
 
-    if connection is None:
+    if command in ("/start", "/settings"):
+        if connection is None:
+            await send_welcome_menu(chat_id)
+        else:
+            await send_settings_menu(
+                chat_id,
+                await get_owner_settings(owner_id),
+            )
         return
 
-    # The owner can manage only settings belonging to their own connection.
-    command_parts = text_content.strip().split()
-    command = command_parts[0].split("@", 1)[0].lower()
-
-    if command in ("/start", "/settings"):
-        await send_settings_menu(
-            chat_id,
-            await get_owner_settings(owner_id),
-        )
+    if connection is None:
         return
 
     if command == "/setting":
@@ -625,26 +664,56 @@ async def process_callback_query(callback: dict):
         return
 
 
+def clear_connection_snapshots(connection_id: str):
+    for key in list(SNAPSHOTS):
+        if key[0] == connection_id:
+            snapshot = SNAPSHOTS.pop(key, None)
+            if snapshot:
+                delete_cached_media(snapshot.get("file_path"))
+
+
 def save_business_connection(data: dict):
     connection_id = data.get("id")
     user = data.get("user") or {}
+    owner_id = user.get("id")
+    owner_chat_id = data.get("user_chat_id")
 
-    if not connection_id or not user.get("id") or not data.get("user_chat_id"):
+    if not connection_id or not owner_id or not owner_chat_id:
         log.warning("Business connection update is incomplete")
-        return
+        return None
 
     if not data.get("is_enabled"):
-        CONNECTIONS.pop(connection_id, None)
+        previous = CONNECTIONS.pop(connection_id, None)
+        clear_connection_snapshots(connection_id)
         log.info("Business connection disabled")
-        return
+        return {
+            "owner_id": int(owner_id),
+            "owner_chat_id": int(owner_chat_id),
+            "enabled": False,
+            "previous": previous,
+        }
 
-    CONNECTIONS[connection_id] = {
-        "owner_id": user["id"],
-        "owner_chat_id": data["user_chat_id"],
+    rights = data.get("rights") or {}
+    connection = {
+        "owner_id": int(owner_id),
+        "owner_chat_id": int(owner_chat_id),
         "enabled": True,
+        "rights": {
+            key: value
+            for key, value in rights.items()
+            if isinstance(value, bool)
+        },
+        "business_user": {
+            key: user[key]
+            for key in ("id", "first_name", "last_name", "username")
+            if key in user
+        },
+        "connected_at": data.get("date"),
     }
 
-    log.info("Business connection is active in RAM")
+    CONNECTIONS[connection_id] = connection
+    log.info("Business connection activated for owner %s", owner_id)
+    return connection
 
 
 async def process_business_message(message: dict, edited: bool = False):
@@ -913,8 +982,35 @@ async def process_deleted_messages(data: dict):
 async def handle_update(update: dict):
     if "business_connection" in update:
         data = update["business_connection"]
-        save_business_connection(data)
+
+        # Persist the connection update before making it active in RAM.
         await firestore_store.persist_business_connection(data)
+        connection = save_business_connection(data)
+
+        if connection:
+            owner_id = connection["owner_id"]
+            owner_chat_id = connection["owner_chat_id"]
+
+            if connection["enabled"]:
+                settings = await get_owner_settings(owner_id)
+                await firestore_store.persist_user_settings(
+                    owner_id,
+                    settings,
+                )
+                await notify(
+                    owner_chat_id,
+                    "✅ تم توصيل حساب Telegram Business بنجاح. "
+                    "هذه إعداداتك الخاصة.",
+                )
+                await send_settings_menu(owner_chat_id, settings)
+            else:
+                await notify(
+                    owner_chat_id,
+                    "🔌 تم فصل اتصال Telegram Business. "
+                    "أوقفت خدمات الحساب. يمكنك إعادة توصيله من القائمة.",
+                )
+                await send_welcome_menu(owner_chat_id)
+
     elif "business_message" in update:
         await process_business_message(update["business_message"])
     elif "edited_business_message" in update:
