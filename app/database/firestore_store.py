@@ -135,3 +135,69 @@ async def persist_business_connection(data: dict):
         connection_id,
         owner_chat_id,
     )
+
+
+def _load_user_settings_sync(owner_ids):
+    db = _get_db()
+    result = {}
+
+    for owner_id in owner_ids:
+        reference = (
+            db.collection("users")
+            .document(str(owner_id))
+            .collection("settings")
+            .document("media")
+        )
+        document = reference.get()
+
+        if document.exists:
+            result[str(owner_id)] = document.to_dict() or {}
+
+    return result
+
+
+def _write_user_settings_sync(owner_id, settings):
+    from firebase_admin import firestore
+
+    db = _get_db()
+    reference = (
+        db.collection("users")
+        .document(str(owner_id))
+        .collection("settings")
+        .document("media")
+    )
+
+    reference.set({
+        "owner_id": int(owner_id),
+        **settings,
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }, merge=True)
+
+
+async def load_user_settings(owner_ids):
+    if not is_configured():
+        return None
+
+    unique_ids = sorted({int(owner_id) for owner_id in owner_ids})
+    if not unique_ids:
+        return {}
+
+    return await asyncio.to_thread(
+        _load_user_settings_sync,
+        unique_ids,
+    )
+
+
+async def persist_user_settings(owner_id, settings):
+    if not is_configured():
+        return
+
+    from app.user_settings import normalize_user_settings
+
+    safe_settings = normalize_user_settings(settings)
+
+    await asyncio.to_thread(
+        _write_user_settings_sync,
+        int(owner_id),
+        safe_settings,
+    )

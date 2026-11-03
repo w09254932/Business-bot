@@ -2,6 +2,7 @@ import os
 import hmac
 import logging
 import time
+import asyncio
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -11,6 +12,12 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
 from app.media.one_time_rescue import rescue_reply_media
 from app.database import firestore_store
+from app.user_settings import (
+    BOOLEAN_SETTINGS,
+    DEFAULT_USER_SETTINGS,
+    RETENTION_OPTIONS,
+    normalize_user_settings,
+)
 
 load_dotenv()
 
@@ -27,6 +34,8 @@ MAX_PROCESSED_UPDATES = 10000
 CONNECTIONS = {}
 SNAPSHOTS = OrderedDict()
 PROCESSED_UPDATES = OrderedDict()
+USER_SETTINGS = {}
+MEMORY_CLEANUP_INTERVAL_SECONDS = 60
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,11 +77,19 @@ def prune_memory():
     now = time.monotonic()
 
     # Remove every expired snapshot, regardless of LRU access order.
-    expired_keys = [
-        key
-        for key, value in SNAPSHOTS.items()
-        if now - value["saved_at"] > SNAPSHOT_TTL
-    ]
+    expired_keys = []
+
+    for key, value in SNAPSHOTS.items():
+        connection = CONNECTIONS.get(key[0]) or {}
+        owner_id = connection.get("owner_id")
+        if owner_id is not None and owner_id in USER_SETTINGS:
+            settings = USER_SETTINGS[owner_id]
+            ttl_seconds = int(settings["retention_hours"]) * 3600
+        else:
+            ttl_seconds = SNAPSHOT_TTL
+
+        if now - value["saved_at"] > ttl_seconds:
+            expired_keys.append(key)
 
     for key in expired_keys:
         SNAPSHOTS.pop(key, None)
@@ -82,6 +99,177 @@ def prune_memory():
 
     while len(PROCESSED_UPDATES) > MAX_PROCESSED_UPDATES:
         PROCESSED_UPDATES.popitem(last=False)
+
+
+
+async def get_owner_settings(owner_id: int) -> dict:
+    owner_id = int(owner_id)
+
+    if owner_id in USER_SETTINGS:
+        return USER_SETTINGS[owner_id]
+
+    saved = await firestore_store.load_user_settings([owner_id])
+
+    if saved is None:
+        data = {}
+    else:
+        data = saved.get(str(owner_id), {})
+
+    settings = normalize_user_settings(data)
+    USER_SETTINGS[owner_id] = settings
+    return settings
+
+
+async def save_owner_settings(owner_id: int, settings: dict):
+    owner_id = int(owner_id)
+    safe_settings = normalize_user_settings(settings)
+
+    await firestore_store.persist_user_settings(
+        owner_id,
+        safe_settings,
+    )
+
+    USER_SETTINGS[owner_id] = safe_settings
+    prune_memory()
+
+
+def format_owner_settings(settings: dict) -> str:
+    labels = {
+        "capture_once": "استعادة الوسائط المؤقتة",
+        "capture_any_media": "التقاط أي وسيط عند الرد",
+        "rescue_photo": "الصور",
+        "rescue_video": "الفيديو",
+        "rescue_voice": "الرسائل الصوتية",
+        "rescue_audio": "ملفات الصوت",
+        "rescue_document": "الملفات",
+        "rescue_animation": "صور GIF المتحركة",
+        "rescue_video_note": "رسائل الفيديو الدائرية",
+        "rescue_sticker": "الملصقات",
+    }
+
+    lines = ["⚙️ إعدادات البوت", ""]
+
+    for key, label in labels.items():
+        state = "مفعّل ✅" if settings[key] else "متوقف ⛔"
+        lines.append(f"{label}: {state}")
+
+    lines.extend([
+        "",
+        f"مدة الاحتفاظ: {settings['retention_hours']} ساعة",
+        "",
+        "أوامر التحكم:",
+        "/setting capture_once on أو off",
+        "/setting capture_any_media on أو off",
+        "/setting rescue_photo on أو off",
+        "/setting rescue_video on أو off",
+        "/setting rescue_voice on أو off",
+        "/setting rescue_audio on أو off",
+        "/setting rescue_document on أو off",
+        "/setting rescue_animation on أو off",
+        "/setting rescue_video_note on أو off",
+        "/setting rescue_sticker on أو off",
+        "/retention 1 أو 6 أو 12 أو 24 أو 72 أو 168",
+    ])
+
+    return "\n".join(lines)
+
+
+async def process_private_message(message: dict):
+    chat = message.get("chat") or {}
+    sender = message.get("from") or {}
+
+    if chat.get("type") != "private":
+        return
+
+    owner_id = sender.get("id")
+    chat_id = chat.get("id")
+    text_content = message.get("text") or ""
+
+    if not owner_id or not chat_id or not text_content.startswith("/"):
+        return
+
+    connection = next(
+        (
+            item
+            for item in CONNECTIONS.values()
+            if item.get("enabled") and item.get("owner_id") == owner_id
+        ),
+        None,
+    )
+
+    if connection is None:
+        return
+
+    # The owner can manage only settings belonging to their own connection.
+    command_parts = text_content.strip().split()
+    command = command_parts[0].split("@", 1)[0].lower()
+
+    if command in ("/start", "/settings"):
+        await notify(chat_id, format_owner_settings(
+            await get_owner_settings(owner_id)
+        ))
+        return
+
+    if command == "/setting":
+        if len(command_parts) != 3:
+            await notify(
+                chat_id,
+                "صيغة الأمر: /setting اسم_الإعداد on أو off\n"
+                "استخدم /settings لعرض أسماء الإعدادات."
+            )
+            return
+
+        key = command_parts[1].strip()
+        value = command_parts[2].lower()
+
+        if key not in BOOLEAN_SETTINGS or value not in ("on", "off"):
+            await notify(
+                chat_id,
+                "الإعداد غير معروف أو القيمة غير صحيحة. "
+                "راجع /settings."
+            )
+            return
+
+        settings = dict(await get_owner_settings(owner_id))
+        settings[key] = value == "on"
+
+        await save_owner_settings(owner_id, settings)
+        await notify(
+            chat_id,
+            f"تم تحديث {key}: {'مفعّل ✅' if settings[key] else 'متوقف ⛔'}"
+        )
+        return
+
+    if command == "/retention":
+        if len(command_parts) != 2:
+            await notify(
+                chat_id,
+                "استخدم: /retention 1 أو 6 أو 12 أو 24 أو 72 أو 168"
+            )
+            return
+
+        try:
+            hours = int(command_parts[1])
+        except ValueError:
+            hours = -1
+
+        if hours not in RETENTION_OPTIONS:
+            await notify(
+                chat_id,
+                "المدة غير صحيحة. الخيارات: 1، 6، 12، 24، 72، 168 ساعة."
+            )
+            return
+
+        settings = dict(await get_owner_settings(owner_id))
+        settings["retention_hours"] = hours
+
+        await save_owner_settings(owner_id, settings)
+        await notify(
+            chat_id,
+            f"تم ضبط مدة الاحتفاظ على {hours} ساعة. "
+            "سيتم تنظيف النسخ المنتهية تلقائياً."
+        )
+        return
 
 
 def remember_update(update_id: int) -> bool:
@@ -230,6 +418,7 @@ async def process_business_message(message: dict, edited: bool = False):
     sender_id = (message.get("from") or {}).get("id")
     owner_id = connection["owner_id"]
     owner_chat_id = connection["owner_chat_id"]
+    owner_settings = await get_owner_settings(owner_id)
 
     chat_id = (message.get("chat") or {}).get("id")
     message_id = message.get("message_id")
@@ -244,6 +433,7 @@ async def process_business_message(message: dict, edited: bool = False):
                 message,
                 owner_chat_id,
                 send_saved_media,
+                owner_settings,
             )
 
             if result["ok"]:
@@ -258,6 +448,12 @@ async def process_business_message(message: dict, edited: bool = False):
                     "لم تصل بيانات وسيط قابلة لإعادة الإرسال من Telegram "
                     "في الرسالة التي رددت عليها."
                 )
+            elif result["reason"] in (
+                "not_one_time",
+                "rescue_disabled",
+                "media_type_disabled",
+            ):
+                return
             else:
                 await notify(
                     owner_chat_id,
@@ -355,6 +551,8 @@ async def handle_update(update: dict):
         )
     elif "deleted_business_messages" in update:
         await process_deleted_messages(update["deleted_business_messages"])
+    elif "message" in update:
+        await process_private_message(update["message"])
 
 
 async def register_webhook():
@@ -372,6 +570,7 @@ async def register_webhook():
             "url": f"{base_url}/telegram/webhook",
             "secret_token": WEBHOOK_SECRET,
             "allowed_updates": [
+                "message",
                 "business_connection",
                 "business_message",
                 "edited_business_message",
@@ -384,6 +583,13 @@ async def register_webhook():
         log.error("Webhook registration failed")
 
 
+async def memory_janitor():
+    while True:
+        prune_memory()
+        await asyncio.sleep(MEMORY_CLEANUP_INTERVAL_SECONDS)
+
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     saved_connections = await firestore_store.load_connections()
@@ -392,11 +598,38 @@ async def lifespan(app: FastAPI):
         CONNECTIONS.clear()
         CONNECTIONS.update(saved_connections)
         log.info("Business connections restored from Firestore")
+
+        owner_ids = {
+            item["owner_id"]
+            for item in CONNECTIONS.values()
+            if item.get("enabled")
+        }
+
+        saved_settings = await firestore_store.load_user_settings(owner_ids)
+
+        if saved_settings is not None:
+            USER_SETTINGS.clear()
+            for owner_id in owner_ids:
+                USER_SETTINGS[int(owner_id)] = normalize_user_settings(
+                    saved_settings.get(str(owner_id), {})
+                )
+
+        log.info("Owner settings restored")
     else:
         log.info("Storage mode: RAM only")
 
+    janitor_task = asyncio.create_task(memory_janitor())
+
     await register_webhook()
-    yield
+
+    try:
+        yield
+    finally:
+        janitor_task.cancel()
+        try:
+            await janitor_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(

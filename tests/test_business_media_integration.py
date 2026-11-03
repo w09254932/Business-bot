@@ -37,6 +37,7 @@ def test_owner_reply_resends_accessible_photo(monkeypatch):
             "reply_to_message": {
                 "from": {"id": 7},
                 "photo": [{"file_id": "photo-123"}],
+                "view_once": True,
             },
         })
 
