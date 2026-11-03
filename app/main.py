@@ -455,9 +455,14 @@ async def process_business_message(message: dict, edited: bool = False):
             ):
                 return
             else:
+                telegram_error = result.get(
+                    "telegram_error",
+                    "سبب الرفض غير متوفر",
+                )
                 await notify(
                     owner_chat_id,
-                    "وصلت بيانات الوسيط، لكن Telegram رفض إعادة إرساله."
+                    "وصلت بيانات الوسيط، لكن Telegram رفض إعادة إرساله.\\n"
+                    f"تفاصيل الرفض: {telegram_error}"
                 )
         return
 

@@ -132,11 +132,21 @@ async def rescue_reply_media(
             media["media_type"],
             media["file_id"],
         )
-    except Exception:
+    except Exception as exc:
+        error_text = str(exc)
+
+        # Expose only sanitized Telegram API errors, never request URLs.
+        safe_error = (
+            error_text[:240]
+            if error_text.startswith("Telegram API ")
+            else type(exc).__name__
+        )
+
         return {
             "ok": False,
             "reason": "telegram_send_failed",
             "media_type": media["media_type"],
+            "telegram_error": safe_error,
         }
 
     return {"ok": True, "media_type": media["media_type"]}
