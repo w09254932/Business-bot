@@ -11,9 +11,3 @@ services:
         sync: false
       - key: WEBHOOK_SECRET
         generateValue: true
-      - key: DATABASE_PATH
-        value: /var/data/business_bot.db
-    disk:
-      name: business-bot-data
-      mountPath: /var/data
-      sizeGB: 1
