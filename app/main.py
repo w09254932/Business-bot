@@ -10,7 +10,14 @@ from typing import Optional
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
-from app.media.one_time_rescue import rescue_reply_media
+from app.media.one_time_rescue import is_one_time, rescue_reply_media
+from app.media.cache import (
+    cache_enabled,
+    cache_telegram_media,
+    delete_cached_media,
+    media_metadata,
+    upload_cached_media,
+)
 from app.database import firestore_store
 from app.user_settings import (
     BOOLEAN_SETTINGS,
@@ -92,10 +99,13 @@ def prune_memory():
             expired_keys.append(key)
 
     for key in expired_keys:
-        SNAPSHOTS.pop(key, None)
+        old_snapshot = SNAPSHOTS.pop(key, None)
+        if old_snapshot:
+            delete_cached_media(old_snapshot.get("file_path"))
 
     while len(SNAPSHOTS) > MAX_SNAPSHOTS:
-        SNAPSHOTS.popitem(last=False)
+        _, old_snapshot = SNAPSHOTS.popitem(last=False)
+        delete_cached_media(old_snapshot.get("file_path"))
 
     while len(PROCESSED_UPDATES) > MAX_PROCESSED_UPDATES:
         PROCESSED_UPDATES.popitem(last=False)
@@ -294,15 +304,21 @@ def remember_snapshot(connection_id: str, message: dict):
 
     # Keep only the minimum fields needed for temporary recovery.
     key = (connection_id, chat_id, message_id)
+    previous = SNAPSHOTS.get(key)
+    if previous:
+        delete_cached_media(previous.get("file_path"))
+
     SNAPSHOTS[key] = {
         "text": message.get("text") or message.get("caption") or "",
         "media_type": media_type,
         "file_id": file_id,
         "file_unique_id": unique_id,
+        "file_path": None,
         "saved_at": time.monotonic(),
     }
     SNAPSHOTS.move_to_end(key)
     prune_memory()
+    return SNAPSHOTS.get(key)
 
 
 def get_snapshot(connection_id: str, chat_id: int, message_id: int):
@@ -317,7 +333,9 @@ def get_snapshot(connection_id: str, chat_id: int, message_id: int):
 
 
 def forget_snapshot(connection_id: str, chat_id: int, message_id: int):
-    SNAPSHOTS.pop((connection_id, chat_id, message_id), None)
+    snapshot = SNAPSHOTS.pop((connection_id, chat_id, message_id), None)
+    if snapshot:
+        delete_cached_media(snapshot.get("file_path"))
 
 
 async def telegram(method: str, payload: dict):
@@ -360,6 +378,7 @@ async def send_saved_media(
     owner_chat_id: int,
     media_type: str,
     file_id: str,
+    file_path: str | None = None,
 ):
     methods = {
         "photo": ("sendPhoto", "photo"),
@@ -377,10 +396,20 @@ async def send_saved_media(
 
     method, field = methods[media_type]
 
-    return await telegram(method, {
-        "chat_id": owner_chat_id,
-        field: file_id,
-    })
+    try:
+        return await telegram(method, {
+            "chat_id": owner_chat_id,
+            field: file_id,
+        })
+    except Exception:
+        if file_path and os.path.isfile(file_path):
+            return await upload_cached_media(
+                BOT_TOKEN,
+                owner_chat_id,
+                media_type,
+                file_path,
+            )
+        raise
 
 
 def save_business_connection(data: dict):
@@ -429,10 +458,40 @@ async def process_business_message(message: dict, edited: bool = False):
         original_sender = (original.get("from") or {}).get("id")
 
         if original_sender != owner_id:
+            original_chat_id = (original.get("chat") or {}).get("id")
+            original_message_id = original.get("message_id")
+            original_snapshot = None
+
+            if original_chat_id is not None and original_message_id is not None:
+                original_snapshot = get_snapshot(
+                    connection_id,
+                    original_chat_id,
+                    original_message_id,
+                )
+
+            async def send_reply_media(chat_id, media_type, file_id):
+                cached_path = None
+
+                if (
+                    original_snapshot
+                    and original_snapshot.get("media_type") == media_type
+                    and original_snapshot.get("file_id") == file_id
+                ):
+                    cached_path = original_snapshot.get("file_path")
+
+                if cached_path:
+                    return await send_saved_media(
+                        chat_id, media_type, file_id, cached_path
+                    )
+
+                return await send_saved_media(
+                    chat_id, media_type, file_id
+                )
+
             result = await rescue_reply_media(
                 message,
                 owner_chat_id,
-                send_saved_media,
+                send_reply_media,
                 owner_settings,
             )
 
@@ -474,7 +533,29 @@ async def process_business_message(message: dict, edited: bool = False):
     text_content = message.get("text") or message.get("caption") or ""
     media_type, file_id, _ = extract_media(message)
 
-    remember_snapshot(connection_id, message)
+    snapshot = remember_snapshot(connection_id, message)
+
+    # Cache ordinary media on arrival. Known one-time media is excluded.
+    if (
+        snapshot
+        and media_type
+        and file_id
+        and cache_enabled()
+        and not is_one_time(message)
+    ):
+        metadata = media_metadata(message) or {}
+
+        try:
+            cached_path = await cache_telegram_media(
+                BOT_TOKEN,
+                file_id,
+                metadata.get("file_unique_id"),
+                metadata.get("file_size"),
+            )
+            if cached_path:
+                snapshot["file_path"] = cached_path
+        except Exception:
+            log.warning("Media cache failed")
 
     if edited:
         old_text = old["text"] if old else "(النسخة السابقة غير متوفرة في الذاكرة)"
@@ -495,7 +576,16 @@ async def process_business_message(message: dict, edited: bool = False):
     # Forward accessible media to the owner without downloading or archiving it.
     if media_type and file_id:
         try:
-            await send_saved_media(owner_chat_id, media_type, file_id)
+            cached_path = snapshot.get("file_path") if snapshot else None
+
+            if cached_path:
+                await send_saved_media(
+                    owner_chat_id, media_type, file_id, cached_path
+                )
+            else:
+                await send_saved_media(
+                    owner_chat_id, media_type, file_id
+                )
         except Exception:
             log.error("Incoming media forwarding failed")
 
@@ -531,11 +621,21 @@ async def process_deleted_messages(data: dict):
 
         if snapshot["media_type"] and snapshot["file_id"]:
             try:
-                await send_saved_media(
-                    owner_chat_id,
-                    snapshot["media_type"],
-                    snapshot["file_id"],
-                )
+                cached_path = snapshot.get("file_path")
+
+                if cached_path:
+                    await send_saved_media(
+                        owner_chat_id,
+                        snapshot["media_type"],
+                        snapshot["file_id"],
+                        cached_path,
+                    )
+                else:
+                    await send_saved_media(
+                        owner_chat_id,
+                        snapshot["media_type"],
+                        snapshot["file_id"],
+                    )
             except Exception:
                 log.error("Deleted media resend failed")
 
