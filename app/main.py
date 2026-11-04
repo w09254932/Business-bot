@@ -205,7 +205,7 @@ def build_settings_keyboard(settings: dict):
             }],
             [{
                 "text": "🔗 إدارة اتصال Telegram Business",
-                "url": "tg://settings/business",
+                "url": "tg://settings/edit",
             }],
         ]
     }
@@ -238,7 +238,7 @@ def build_welcome_keyboard():
         "inline_keyboard": [[
             {
                 "text": "🔗 توصيل حساب Telegram Business",
-                "url": "tg://settings/business",
+                "url": "tg://settings/edit",
             }
         ]]
     }

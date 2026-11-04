@@ -20,7 +20,7 @@ def test_unconnected_user_sees_welcome(monkeypatch):
 
     assert calls[0][0] == "sendMessage"
     button = calls[0][1]["reply_markup"]["inline_keyboard"][0][0]
-    assert button["url"] == "tg://settings/business"
+    assert button["url"] == "tg://settings/edit"
     assert "اربط حساب" in calls[0][1]["text"]
 
 
