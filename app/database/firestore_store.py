@@ -140,6 +140,7 @@ def _delete_connection_sync(owner_id, connection_id):
 
         batch.commit()
 
+    # Keep message_archive as durable audit metadata after disconnection.
     reference.delete()
 
 
@@ -515,4 +516,137 @@ async def prune_message_snapshots(
         owner_id,
         connection_id,
         retention_hours,
+    )
+
+def _archive_reference(db, owner_id, connection_id, chat_id, message_id):
+    document_id = f"{int(chat_id)}_{int(message_id)}"
+    return (
+        db.collection("users")
+        .document(str(int(owner_id)))
+        .collection(COLLECTION_NAME)
+        .document(str(connection_id))
+        .collection("message_archive")
+        .document(document_id)
+    )
+
+
+def _write_archive_record_sync(owner_id, connection_id, record):
+    from firebase_admin import firestore
+
+    db = _get_db()
+    reference = _archive_reference(
+        db, owner_id, connection_id,
+        record["chat_id"], record["message_id"],
+    )
+
+    previous_document = reference.get()
+    previous = previous_document.to_dict() or {}
+
+    archive_message_id = int(record["archive_message_id"])
+    data = {
+        "owner_id": int(owner_id),
+        "connection_id": str(connection_id),
+        "chat_id": int(record["chat_id"]),
+        "message_id": int(record["message_id"]),
+        "archive_chat_id": record["archive_chat_id"],
+        "first_archive_message_id": previous.get(
+            "first_archive_message_id", archive_message_id
+        ),
+        "latest_archive_message_id": archive_message_id,
+        "archive_media_message_id": record.get(
+            "archive_media_message_id"
+        ),
+        "media_status": record.get("media_status", "not_applicable"),
+        "media_error": str(record.get("media_error") or "")[:500],
+        "direction": record.get("direction"),
+        "event": record.get("event", "new"),
+        "is_deleted": previous.get("is_deleted", False),
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }
+
+    if not previous_document.exists:
+        data["created_at"] = firestore.SERVER_TIMESTAMP
+
+    reference.set(data, merge=True)
+
+
+def _read_archive_record_sync(
+    owner_id, connection_id, chat_id, message_id
+):
+    db = _get_db()
+    reference = _archive_reference(
+        db, owner_id, connection_id, chat_id, message_id
+    )
+    document = reference.get()
+
+    if not document.exists:
+        return None
+
+    return document.to_dict() or {}
+
+
+def _mark_archive_deleted_sync(
+    owner_id, connection_id, chat_id, message_id, notice_message_id=None
+):
+    from firebase_admin import firestore
+
+    db = _get_db()
+    reference = _archive_reference(
+        db, owner_id, connection_id, chat_id, message_id
+    )
+    document = reference.get()
+
+    if not document.exists:
+        return False
+
+    data = {
+        "is_deleted": True,
+        "deleted_at": firestore.SERVER_TIMESTAMP,
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }
+    if notice_message_id is not None:
+        data["delete_notice_message_id"] = int(notice_message_id)
+
+    reference.set(data, merge=True)
+    return True
+
+
+async def persist_archive_record(owner_id, connection_id, record):
+    if not is_configured():
+        return False
+
+    required = (
+        "chat_id", "message_id", "archive_chat_id", "archive_message_id"
+    )
+    if any(record.get(key) is None for key in required):
+        raise ValueError("Incomplete archive record")
+
+    await asyncio.to_thread(
+        _write_archive_record_sync, owner_id, connection_id, record
+    )
+    return True
+
+
+async def load_archive_record(
+    owner_id, connection_id, chat_id, message_id
+):
+    if not is_configured():
+        return None
+
+    return await asyncio.to_thread(
+        _read_archive_record_sync,
+        owner_id, connection_id, chat_id, message_id,
+    )
+
+
+async def mark_archive_deleted(
+    owner_id, connection_id, chat_id, message_id,
+    notice_message_id=None,
+):
+    if not is_configured():
+        return False
+
+    return await asyncio.to_thread(
+        _mark_archive_deleted_sync,
+        owner_id, connection_id, chat_id, message_id, notice_message_id,
     )

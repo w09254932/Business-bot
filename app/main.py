@@ -19,6 +19,7 @@ from app.media.cache import (
     upload_cached_media,
 )
 from app.database import firestore_store
+from app.channel_archive import publish_archive_message, publish_archive_notice
 from app.user_settings import (
     BOOLEAN_SETTINGS,
     DEFAULT_USER_SETTINGS,
@@ -720,6 +721,118 @@ def save_business_connection(data: dict):
     return connection
 
 
+async def _publish_business_archive(
+    message: dict,
+    owner_id: int,
+    connection_id: str,
+    direction: str,
+    event: str = "new",
+):
+    chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
+
+    if chat_id is None or message_id is None:
+        return None
+
+    try:
+        reply_to_message_id = None
+
+        if event == "edited":
+            previous = await firestore_store.load_archive_record(
+                owner_id, connection_id, chat_id, message_id
+            )
+            if previous:
+                reply_to_message_id = (
+                    previous.get("latest_archive_message_id")
+                    or previous.get("first_archive_message_id")
+                )
+
+        media_type, file_id, _ = extract_media(message)
+
+        published = await publish_archive_message(
+            message=message,
+            owner_id=owner_id,
+            direction=direction,
+            telegram_call=telegram,
+            media_type=media_type,
+            file_id=file_id,
+            event=event,
+            reply_to_message_id=reply_to_message_id,
+        )
+
+        if not published:
+            return None
+
+        record = {
+            "chat_id": int(chat_id),
+            "message_id": int(message_id),
+            **published,
+        }
+
+        persisted = await firestore_store.persist_archive_record(
+            owner_id, connection_id, record
+        )
+
+        if not persisted:
+            log.warning("Archive mapping is not persistent: Firestore is disabled")
+
+        return record
+
+    except Exception:
+        log.exception("Business channel archive failed")
+        return None
+
+
+async def _publish_business_archive_deletion(
+    owner_id: int,
+    connection_id: str,
+    chat_id: int,
+    message_id: int,
+):
+    try:
+        record = await firestore_store.load_archive_record(
+            owner_id, connection_id, chat_id, message_id
+        )
+
+        if not record or record.get("is_deleted"):
+            return None
+
+        reply_to = (
+            record.get("latest_archive_message_id")
+            or record.get("first_archive_message_id")
+        )
+        if reply_to is None:
+            return None
+
+        notice = await publish_archive_notice(
+            text=(
+                "🗑️ تم حذف الرسالة الأصلية من Telegram Business.\n"
+                f"صاحب الحساب: {owner_id}\n"
+                f"معرّف المحادثة: {chat_id}\n"
+                f"معرّف الرسالة: {message_id}\n"
+                "تم الاحتفاظ بنسخة الأرشيف."
+            ),
+            telegram_call=telegram,
+            reply_to_message_id=int(reply_to),
+        )
+
+        if not notice:
+            return None
+
+        await firestore_store.mark_archive_deleted(
+            owner_id,
+            connection_id,
+            chat_id,
+            message_id,
+            notice.get("archive_message_id"),
+        )
+        return notice
+
+    except Exception:
+        log.exception("Business archive deletion notice failed")
+        return None
+
+
 async def process_business_message(message: dict, edited: bool = False):
     connection_id = message.get("business_connection_id")
     if not connection_id:
@@ -742,6 +855,10 @@ async def process_business_message(message: dict, edited: bool = False):
     if sender_id == owner_id:
         reply_content = message.get("text") or message.get("caption") or ""
         if not reply_content.startswith(chr(0x064e)):
+            await _publish_business_archive(
+                message, owner_id, connection_id, "outgoing",
+                event="edited" if edited else "new",
+            )
             return
 
         original = message.get("reply_to_message") or {}
@@ -887,6 +1004,11 @@ async def process_business_message(message: dict, edited: bool = False):
             snapshot,
         )
 
+    await _publish_business_archive(
+        message, owner_id, connection_id, "incoming",
+        event="edited" if edited else "new",
+    )
+
     # Edits remain important notifications.
     if edited:
         old_text = old["text"] if old else "(النسخة السابقة غير متوفرة)"
@@ -940,6 +1062,9 @@ async def process_deleted_messages(data: dict):
     owner_chat_id = connection["owner_chat_id"]
 
     for message_id in message_ids:
+        await _publish_business_archive_deletion(
+            connection["owner_id"], connection_id, chat_id, message_id
+        )
         snapshot = await get_snapshot_with_firestore(
             connection_id,
             chat_id,

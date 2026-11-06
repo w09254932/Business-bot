@@ -11,6 +11,8 @@ services:
         sync: false
       - key: WEBHOOK_SECRET
         generateValue: true
+      - key: ARCHIVE_CHANNEL_ID
+        sync: false
 
       - key: FIREBASE_SERVICE_ACCOUNT_JSON
         sync: false
