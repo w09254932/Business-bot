@@ -56,6 +56,51 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("business-bot")
 
 
+def normalize_sender(user):
+    if not isinstance(user, dict):
+        return {}
+
+    result = {}
+    for key in ("id", "first_name", "last_name", "username"):
+        value = user.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                continue
+        result[key] = value
+    return result
+
+
+def merge_sender_profiles(current, fallback=None):
+    sender = normalize_sender(fallback)
+    sender.update(normalize_sender(current))
+    return sender
+
+
+def format_sender_identity(user):
+    sender = normalize_sender(user)
+    parts = []
+
+    username = sender.get("username")
+    if username:
+        parts.append("@" + str(username).lstrip("@"))
+
+    name = " ".join(
+        str(sender[key])
+        for key in ("first_name", "last_name")
+        if sender.get(key)
+    )
+    if name:
+        parts.append(name)
+
+    if sender.get("id") is not None:
+        parts.append(f"ID: {sender['id']}")
+
+    return " | ".join(parts) or "غير متوفر"
+
+
 def extract_media(message: dict):
     if not isinstance(message, dict):
         return None, None, None
@@ -400,6 +445,7 @@ def remember_snapshot(connection_id: str, message: dict):
         "file_id": file_id,
         "file_unique_id": unique_id,
         "file_path": None,
+        "sender": normalize_sender(message.get("from") or {}),
         "saved_at": time.monotonic(),
     }
     SNAPSHOTS.move_to_end(key)
@@ -456,6 +502,7 @@ async def get_snapshot_with_firestore(
         "file_id": saved.get("file_id"),
         "file_unique_id": saved.get("file_unique_id"),
         "file_path": None,
+        "sender": normalize_sender(saved.get("sender") or {"id": saved.get("sender_id")}),
         "saved_at": time.monotonic() - age,
     }
 
@@ -485,7 +532,8 @@ async def persist_message_snapshot(
         {
             "chat_id": chat_id,
             "message_id": message_id,
-            "sender_id": (message.get("from") or {}).get("id"),
+            "sender_id": (snapshot.get("sender") or {}).get("id"),
+            "sender": snapshot.get("sender") or normalize_sender(message.get("from") or {}),
             "text": snapshot.get("text") or "",
             "media_type": snapshot.get("media_type"),
             "file_id": snapshot.get("file_id"),
@@ -763,9 +811,12 @@ async def _publish_business_archive(
         if not published:
             return None
 
+        sender = normalize_sender(message.get("from") or {})
         record = {
             "chat_id": int(chat_id),
             "message_id": int(message_id),
+            "sender_id": sender.get("id"),
+            "sender": sender,
             **published,
         }
 
@@ -788,11 +839,13 @@ async def _publish_business_archive_deletion(
     connection_id: str,
     chat_id: int,
     message_id: int,
+    record: Optional[dict] = None,
 ):
     try:
-        record = await firestore_store.load_archive_record(
-            owner_id, connection_id, chat_id, message_id
-        )
+        if record is None:
+            record = await firestore_store.load_archive_record(
+                owner_id, connection_id, chat_id, message_id
+            )
 
         if not record or record.get("is_deleted"):
             return None
@@ -804,10 +857,13 @@ async def _publish_business_archive_deletion(
         if reply_to is None:
             return None
 
+        sender = record.get("sender") or {"id": record.get("sender_id")}
+
         notice = await publish_archive_notice(
             text=(
                 "🗑️ تم حذف الرسالة الأصلية من Telegram Business.\n"
                 f"صاحب الحساب: {owner_id}\n"
+                f"المرسل: {format_sender_identity(sender)}\n"
                 f"معرّف المحادثة: {chat_id}\n"
                 f"معرّف الرسالة: {message_id}\n"
                 "تم الاحتفاظ بنسخة الأرشيف."
@@ -843,13 +899,28 @@ async def process_business_message(message: dict, edited: bool = False):
         log.warning("Business connection is not available in RAM")
         return
 
-    sender_id = (message.get("from") or {}).get("id")
     owner_id = connection["owner_id"]
     owner_chat_id = connection["owner_chat_id"]
     owner_settings = await get_owner_settings(owner_id)
 
     chat_id = (message.get("chat") or {}).get("id")
     message_id = message.get("message_id")
+
+    old = (
+        await get_snapshot_with_firestore(
+            connection_id, chat_id, message_id, connection
+        )
+        if edited and chat_id is not None and message_id is not None
+        else None
+    )
+
+    sender = merge_sender_profiles(
+        message.get("from") or {},
+        old.get("sender") if old else None,
+    )
+    if sender:
+        message = {**message, "from": sender}
+    sender_id = sender.get("id")
 
     # Only replies starting with Fatha trigger media rescue.
     if sender_id == owner_id:
@@ -963,13 +1034,6 @@ async def process_business_message(message: dict, edited: bool = False):
     if chat_id is None or message_id is None:
         return
 
-    old = (
-        await get_snapshot_with_firestore(
-            connection_id, chat_id, message_id, connection
-        )
-        if edited else None
-    )
-
     text_content = message.get("text") or message.get("caption") or ""
     media_type, file_id, _ = extract_media(message)
 
@@ -1015,6 +1079,7 @@ async def process_business_message(message: dict, edited: bool = False):
         await notify(
             owner_chat_id,
             "✏️ تم تعديل رسالة.\n"
+            f"👤 المرسل: {format_sender_identity(sender)}\n"
             f"النص السابق: {old_text[:1200]}\n"
             f"النص الحالي: {text_content[:1200] or '(لا يوجد نص)'}"
         )
@@ -1022,6 +1087,7 @@ async def process_business_message(message: dict, edited: bool = False):
         await notify(
             owner_chat_id,
             "📩 رسالة جديدة.\n"
+            f"👤 المرسل: {format_sender_identity(sender)}\n"
             f"المحتوى: {text_content[:2500] or '(رسالة وسائط)'}\n"
             f"نوع الوسيط: {media_type or 'لا يوجد'}"
         )
@@ -1062,9 +1128,18 @@ async def process_deleted_messages(data: dict):
     owner_chat_id = connection["owner_chat_id"]
 
     for message_id in message_ids:
-        await _publish_business_archive_deletion(
+        archive_record = await firestore_store.load_archive_record(
             connection["owner_id"], connection_id, chat_id, message_id
         )
+
+        await _publish_business_archive_deletion(
+            connection["owner_id"],
+            connection_id,
+            chat_id,
+            message_id,
+            record=archive_record,
+        )
+
         snapshot = await get_snapshot_with_firestore(
             connection_id,
             chat_id,
@@ -1072,17 +1147,26 @@ async def process_deleted_messages(data: dict):
             connection,
         )
 
+        saved_sender = snapshot.get("sender") if snapshot else {}
+        archived_sender = (archive_record or {}).get("sender") or {
+            "id": (archive_record or {}).get("sender_id")
+        }
+        sender = merge_sender_profiles(saved_sender or {}, archived_sender)
+        sender_text = format_sender_identity(sender)
+
         if not snapshot:
             await notify(
                 owner_chat_id,
-                "🗑️ تم حذف رسالة، لكن نسختها المؤقتة غير متوفرة. "
-                "قد تكون الذاكرة فُقدت بعد إعادة تشغيل الخدمة أو انتهت مدة الاحتفاظ."
+                "🗑️ تم حذف رسالة.\n"
+                f"👤 المرسل: {sender_text}\n"
+                "النسخة المؤقتة غير متوفرة؛ قد تكون الذاكرة فُقدت بعد إعادة تشغيل الخدمة أو انتهت مدة الاحتفاظ."
             )
             continue
 
         await notify(
             owner_chat_id,
             "🗑️ تم حذف رسالة.\n"
+            f"👤 المرسل: {sender_text}\n"
             f"النص المحفوظ مؤقتًا: {snapshot['text'][:2500] or '(لا يوجد نص)'}"
         )
 

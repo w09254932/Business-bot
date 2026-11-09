@@ -294,6 +294,7 @@ def _write_message_snapshot_sync(
         "chat_id": int(snapshot["chat_id"]),
         "message_id": int(snapshot["message_id"]),
         "sender_id": snapshot.get("sender_id"),
+        "sender": snapshot.get("sender") or {},
         "text": str(snapshot.get("text") or "")[:4096],
         "media_type": snapshot.get("media_type"),
         "file_id": snapshot.get("file_id"),
@@ -548,6 +549,8 @@ def _write_archive_record_sync(owner_id, connection_id, record):
         "connection_id": str(connection_id),
         "chat_id": int(record["chat_id"]),
         "message_id": int(record["message_id"]),
+        "sender_id": record.get("sender_id"),
+        "sender": record.get("sender") or {},
         "archive_chat_id": record["archive_chat_id"],
         "first_archive_message_id": previous.get(
             "first_archive_message_id", archive_message_id
