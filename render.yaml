@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: business-bot
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    disk:
+      name: business-bot-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: WEBHOOK_URL
+        sync: false
+      - key: ARCHIVE_CHANNEL_ID
+        sync: false
+      - key: DB_PATH
+        value: /var/data/index.sqlite3
+      - key: SESSION_PATH
+        value: /var/data/archive_bot
