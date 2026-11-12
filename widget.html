@@ -15,7 +15,7 @@
 <script>
 (function(){
 'use strict';
-const TW=window.TelegramWidget;
+const TW=typeof TelegramWidget !== 'undefined' ? TelegramWidget : null;
 const state={mode:'individual',active:'mine',mine:'',opp:'',page:0,busy:false};
 const $=id=>document.getElementById(id);
 const labels={individual:'الفردية',home:'المنزل',team:'الفريق'};
