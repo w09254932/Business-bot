@@ -1,1 +1,1 @@
-"""Telegram Business channel-backed archive bot."""
+"""TR Battle Calculator application package."""

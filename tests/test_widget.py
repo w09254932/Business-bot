@@ -1,6 +1,12 @@
 import unittest
-from datetime import datetime, timezone, timedelta
-from widget_calculator import _history_page, _parse_request, load_widget_html
+from datetime import datetime, timedelta, timezone
+
+from widget_calculator import (
+    encode_widget_answer,
+    get_history_page,
+    load_widget_html,
+    parse_widget_request,
+)
 
 
 class FakeDoc:
@@ -18,11 +24,11 @@ class FakeQuery:
         self.count = 100
 
     def where(self, key, operator, value):
-        self.docs = [d for d in self.docs if d.get(key) == value]
+        self.docs = [row for row in self.docs if row.get(key) == value]
         return self
 
     def order_by(self, key, direction=None):
-        self.docs.sort(key=lambda d: d.get(key), reverse=(direction == "DESCENDING"))
+        self.docs.sort(key=lambda row: row.get(key), reverse=(direction == "DESCENDING"))
         return self
 
     def offset(self, start):
@@ -34,7 +40,7 @@ class FakeQuery:
         return self
 
     def stream(self):
-        return [FakeDoc(d) for d in self.docs[self.start:self.start + self.count]]
+        return [FakeDoc(row) for row in self.docs[self.start:self.start + self.count]]
 
 
 class FakeCollection:
@@ -42,7 +48,7 @@ class FakeCollection:
         self.docs = docs
 
     def where(self, key, operator, value):
-        return FakeQuery([d for d in self.docs if d.get(key) == value])
+        return FakeQuery([row for row in self.docs if row.get(key) == value])
 
 
 class FakeDB:
@@ -53,49 +59,63 @@ class FakeDB:
         return FakeCollection(self.docs)
 
 
-class WidgetProtocolTests(unittest.TestCase):
+class WidgetTests(unittest.TestCase):
     def test_parse_calculation(self):
-        self.assertEqual(_parse_request("calc|individual|25000|18000"),
+        self.assertEqual(parse_widget_request("calc|individual|25000|18000"),
                          ("calc", "individual", 25000, 18000))
-        self.assertEqual(_parse_request("calc|home|0|15000"),
+        self.assertEqual(parse_widget_request("calc|home|0|15000"),
                          ("calc", "home", 0, 15000))
-        self.assertEqual(_parse_request("calc|team|5001|5000"),
+        self.assertEqual(parse_widget_request("calc|team|5001|5000"),
                          ("calc", "team", 5001, 5000))
 
     def test_parse_history(self):
-        self.assertEqual(_parse_request("history|all|2"), ("history", "all", 2))
+        self.assertEqual(parse_widget_request("history|all|2"), ("history", "all", 2))
 
-    def test_reject_invalid_inputs(self):
-        for value in (
-            "calc|evil|10|20",
-            "calc|individual|-1|20",
-            "calc|individual|1.5|20",
-            "history|all|-1",
-            "x" * 65,
-        ):
-            with self.subTest(value=value):
+    def test_invalid_requests_are_rejected(self):
+        invalid = [
+            "calc|evil|10|20", "calc|individual|-1|20", "calc|individual|1.5|20",
+            "history|all|-1", "x" * 65, "calc|individual||20", "calc|team|1|2|3",
+        ]
+        for request in invalid:
+            with self.subTest(request=request):
                 with self.assertRaises(ValueError):
-                    _parse_request(value)
+                    parse_widget_request(request)
 
-    def test_html_meets_telegram_size_limits(self):
+    def test_widget_size_is_within_telegram_limits(self):
         html = load_widget_html()
-        self.assertIn("W.request(data)", html)
+        self.assertIn("TelegramWidget", html)
 
-    def test_history_page_returns_records_and_pagination(self):
+    def test_answer_data_is_within_1024_bytes(self):
+        data = encode_widget_answer({"ok": True, "kind": "result", "message": "تم"})
+        self.assertLessEqual(len(data.encode("utf-8")), 1024)
+
+    def test_history_page_and_pagination(self):
         now = datetime.now(timezone.utc)
         docs = [
-            {"user_id": 7, "mode": "individual", "my_number": i, "opp_number": 2*i,
-             "my_result": 10, "result": "فوز ✅", "ts": now + timedelta(minutes=i)}
+            {"user_id": 7, "mode": "individual", "my_number": i,
+             "opp_number": i * 2, "my_result": 10, "result": "فوز ✅",
+             "ts": now + timedelta(minutes=i)}
             for i in range(7)
         ]
-        result = _history_page(FakeDB(docs), 7, "all", 0)
-        self.assertTrue(result["ok"])
-        self.assertEqual(len(result["rows"]), 5)
-        self.assertTrue(result["has_more"])
-        self.assertEqual(result["rows"][0]["mine"], 6)
-        page2 = _history_page(FakeDB(docs), 7, "all", 1)
-        self.assertEqual(len(page2["rows"]), 2)
-        self.assertFalse(page2["has_more"])
+        first = get_history_page(FakeDB(docs), 7, "all", 0)
+        self.assertTrue(first["ok"])
+        self.assertEqual(len(first["rows"]), 5)
+        self.assertTrue(first["has_more"])
+        self.assertEqual(first["rows"][0]["mine"], 6)
+        second = get_history_page(FakeDB(docs), 7, "all", 1)
+        self.assertEqual(len(second["rows"]), 2)
+        self.assertFalse(second["has_more"])
+
+    def test_history_is_scoped_to_user(self):
+        now = datetime.now(timezone.utc)
+        db = FakeDB([
+            {"user_id": 1, "mode": "team", "my_number": 10, "opp_number": 8,
+             "my_result": 30, "result": "فوز ✅", "ts": now},
+            {"user_id": 2, "mode": "team", "my_number": 90, "opp_number": 80,
+             "my_result": 30, "result": "فوز ✅", "ts": now},
+        ])
+        result = get_history_page(db, 1, "all", 0)
+        self.assertEqual([row["mine"] for row in result["rows"]], [10])
 
 
 if __name__ == "__main__":

@@ -1,7 +1,13 @@
 .env
-*.session
-*.session-journal
-data/
+.env.*
+!.env.example
 __pycache__/
+*.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .venv/
+venv/
+.coverage
+htmlcov/
+.DS_Store

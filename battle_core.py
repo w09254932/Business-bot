@@ -1,56 +1,67 @@
 # -*- coding: utf-8 -*-
-"""Reference copy of the main.py rules, used only by the bundled regression tests.
-The live Widget integration calls the original main.py compute_battle() directly.
+"""Authoritative TR Battle Calculator rules.
+
+The tier tables and battle outcome formulas intentionally preserve the
+original bot behavior: ties are losses, and home mode uses individual tiers.
 """
+from __future__ import annotations
+
+from typing import Any
 
 TIERS_INDIVIDUAL = [
-    (0, 2000, 6),
-    (2001, 4000, 10),
-    (4001, 8000, 14),
-    (8001, 15000, 16),
-    (15001, 50000, 20),
-    (50001, 120000, 24),
-    (120001, 260000, 28),
-    (260001, 500000, 32),
-    (500001, 900000, 36),
-    (900001, 2000000, 40),
-    (2000001, 8000000, 42),
-    (8000001, float("inf"), 44),
+    (0, 2_000, 6),
+    (2_001, 4_000, 10),
+    (4_001, 8_000, 14),
+    (8_001, 15_000, 16),
+    (15_001, 50_000, 20),
+    (50_001, 120_000, 24),
+    (120_001, 260_000, 28),
+    (260_001, 500_000, 32),
+    (500_001, 900_000, 36),
+    (900_001, 2_000_000, 40),
+    (2_000_001, 8_000_000, 42),
+    (8_000_001, float("inf"), 44),
 ]
 
 TIERS_TEAM = [
-    (0, 5000, 6),
-    (5001, 12000, 10),
-    (12001, 26000, 14),
-    (26001, 48000, 16),
-    (48001, 120000, 20),
-    (120001, 200000, 24),
-    (200001, 400000, 28),
-    (400001, 560000, 32),
-    (560001, 800000, 34),
-    (800001, 1600000, 36),
-    (1600001, 3200000, 38),
-    (3200001, 6000000, 40),
-    (6000001, float("inf"), 42),
+    (0, 5_000, 6),
+    (5_001, 12_000, 10),
+    (12_001, 26_000, 14),
+    (26_001, 48_000, 16),
+    (48_001, 120_000, 20),
+    (120_001, 200_000, 24),
+    (200_001, 400_000, 28),
+    (400_001, 560_000, 32),
+    (560_001, 800_000, 34),
+    (800_001, 1_600_000, 36),
+    (1_600_001, 3_200_000, 38),
+    (3_200_001, 6_000_000, 40),
+    (6_000_001, float("inf"), 42),
 ]
 
-MODE_LABELS = {"individual": "الفردية", "team": "الفريق", "home": "المنزل"}
+MODE_LABELS = {"individual": "الفردية", "home": "المنزل", "team": "الفريق"}
 
 
-def points_for(n: int, mode: str = "individual") -> int:
+def points_for(value: int, mode: str = "individual") -> int:
+    """Return the tier points using the original individual/team tables."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("الشعبية يجب أن تكون عددًا صحيحًا غير سالب")
+    if mode not in MODE_LABELS:
+        raise ValueError("نوع المعركة غير معروف")
     tiers = TIERS_TEAM if mode == "team" else TIERS_INDIVIDUAL
-    for lo, hi, pts in tiers:
-        if lo <= n <= hi:
-            return pts
+    for low, high, points in tiers:
+        if low <= value <= high:
+            return points
     return 0
 
 
-def fmt(x) -> str:
-    return str(int(x)) if float(x) == int(x) else f"{x:.1f}"
+def fmt(value: float | int) -> str:
+    number = float(value)
+    return str(int(number)) if number.is_integer() else f"{number:.1f}"
 
 
-def compute_battle(my_number: int, opp_number: int, mode: str):
-    """Keep original behavior: ties are losses; home uses individual tiers."""
+def compute_battle(my_number: int, opp_number: int, mode: str) -> dict[str, Any]:
+    """Calculate a battle without changing the original scoring behavior."""
     if mode not in MODE_LABELS:
         raise ValueError("نوع المعركة غير معروف")
     if isinstance(my_number, bool) or isinstance(opp_number, bool):
@@ -62,7 +73,7 @@ def compute_battle(my_number: int, opp_number: int, mode: str):
 
     my_points = points_for(my_number, mode)
     opp_points = points_for(opp_number, mode)
-    outcome = "win" if my_number > opp_number else "loss"
+    outcome = "win" if my_number > opp_number else "loss"  # التعادل = خسارة
 
     if outcome == "win":
         result_label = "فوز ✅"
@@ -110,6 +121,7 @@ def compute_battle(my_number: int, opp_number: int, mode: str):
 
     return {
         "text": text,
+        "outcome": outcome,
         "my_points": my_points,
         "opp_points": opp_points,
         "result_label": result_label,

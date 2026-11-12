@@ -1,79 +1,120 @@
-# حاسبة معركة الشعبية TR — حزمة تجربة Widget
+# TR Battle Calculator — حاسبة معركة الشعبية
 
-هذه الحزمة تضيف حاسبة HTML Widget داخل محادثة البوت الخاصة. الحساب الفعلي يبقى في Python ويُستدعى من `compute_battle()` الموجودة في `main.py`؛ لا يتم الاعتماد على حساب JavaScript في Telegram.
+مشروع مستقل لبوت Telegram يحسب معارك الشعبية عبر HTML Widget داخل المحادثة الخاصة. لم يعد هذا المستودع مشروع أرشفة Telegram Business، ولا يحتوي على Telethon أو SQLite أو قناة أرشفة.
 
-## محتويات الحزمة
+## المزايا
 
-- `widget.html`: واجهة Widget الحقيقية المرسلة إلى Telegram، بلا مكتبات أو اتصالات خارجية.
-- `preview.html`: معاينة محلية تفاعلية في المتصفح ببيانات وهمية؛ لا ترسل نتائج ولا تحفظ سجلًا فعليًا.
-- `widget_calculator.py`: إرسال `sendWidget`، استقبال `widget_query`، حساب المعركة، وحفظ السجل الدائم في Firestore.
-- `install_widget.py`: يضيف تكامل Widget إلى `main.py` الموجود في جذر المستودع، مع إنشاء نسخة احتياطية.
-- `firestore.indexes.json`: فهارس استعلام سجل المعارك.
-- `battle_core.py`: نسخة مرجعية للاختبارات فقط؛ التشغيل الفعلي يستدعي `compute_battle()` الأصلية من `main.py`.
-- `tests/`: اختبارات بروتوكول Widget وقواعد الحسبة المرجعية.
+- حاسبة واحدة داخل رسالة Telegram: الفردية، المنزل، والفريق.
+- لوحة أرقام داخل Widget؛ لا تعتمد على حقول إدخال أو لوحة مفاتيح النظام.
+- الحساب الرسمي في Python على الخادم، وليس في JavaScript.
+- حفظ دائم لكل المعارك في Firestore بدون حذف تلقائي للسجلات القديمة.
+- سجل خاص بكل مستخدم، مع عرض 5 معارك في كل صفحة.
+- حماية Webhook باستخدام `WEBHOOK_SECRET`.
+- فهارس Firestore جاهزة في `firestore.indexes.json`.
 
-## التثبيت داخل المستودع
+## قواعد الحساب المحفوظة
 
-1. فك الضغط وانسخ محتويات الحزمة إلى **جذر** مستودع `bot-sssss-tlyg` بجانب `main.py`، مع إبقاء المجلد `tests`.
-2. ثبّت المتطلبات الحالية للمستودع:
+- جداول الفردية والفريق مطابقة للجداول الأصلية في بوت الحاسبة.
+- وضع المنزل يستخدم جدول الفردية، كما كان في الكود الأصلي.
+- الفوز: نقاط اللاعب كاملة + نصف نقاط الخصم.
+- الخسارة: نصف نقاط اللاعب، والخصم يحصل على نقاطه كاملة + نصف نقاط اللاعب.
+- التعادل يُعامل كخسارة، كما في الكود الأصلي.
+
+المصدر الوحيد للمعادلات هو `battle_core.py`.
+
+## تشغيل محلي
+
+1. أنشئ بوتًا من [@BotFather](https://t.me/BotFather) وخذ `BOT_TOKEN`.
+2. فعّل Cloud Firestore في مشروع Firebase وأنشئ Service Account بصلاحية مناسبة للوصول إلى قاعدة Firestore.
+3. انسخ `.env.example` إلى `.env` وأكمل المتغيرات:
+
+   - `BOT_TOKEN`: توكن البوت.
+   - `WEBHOOK_SECRET`: سر عشوائي؛ يشتق التطبيق منه قيمة SHA-256 سداسية عشرية متوافقة مع قيود Telegram تلقائيًا.
+   - `WEBHOOK_URL`: اختياري؛ عنوان الخدمة العام. عند تركه فارغًا يستخدم التطبيق `RENDER_EXTERNAL_URL` إن كانت موجودة.
+   - `FIREBASE_CREDENTIALS_JSON`: محتوى JSON كامل لحساب الخدمة في سطر واحد. لا تضع الملف أو المفتاح في GitHub.
+
+4. ثبّت المتطلبات وشغّل الخدمة:
 
    ```bash
+   python -m venv .venv
+   source .venv/bin/activate        # Windows: .venv\\Scripts\\activate
    pip install -r requirements.txt
+   uvicorn app.main:app --host 0.0.0.0 --port 8000
    ```
 
-3. شغّل أداة التثبيت من جذر المستودع:
+5. عند استخدام Webhook محليًا، وفّر عنوان HTTPS عامًا وضعه في `WEBHOOK_URL`. إذا لم يكن العنوان مضبوطًا، لن يسجل التطبيق Webhook تلقائيًا.
+6. افتح البوت في الخاص وأرسل `/start` أو `/widget`.
 
-   ```bash
-   python install_widget.py
-   ```
+## نشر Render
 
-   تنشئ الأداة `main.py.bak` قبل أول تعديل. إذا لم تتطابق نقاط التعديل مع نسخة `main.py`، تتوقف بدل إجراء تعديل جزئي.
+ملف `render.yaml` يحافظ على اسم خدمة Render الحالية `business-bot` لتجنب تغيير عنوان الخدمة أثناء التحويل؛ يمكنك إعادة تسميتها لاحقًا من لوحة Render إذا رغبت.
 
-4. انشر فهارس Firestore من جذر مشروع Firebase:
+متغيرات Render المطلوبة:
 
-   ```bash
-   firebase deploy --only firestore:indexes
-   ```
+- `BOT_TOKEN`
+- `WEBHOOK_SECRET` (ينشئ Render قيمة تلقائية من إعداد `generateValue`)
+- `FIREBASE_CREDENTIALS_JSON`
+- `WEBHOOK_URL` اختياري، ويمكن تركه فارغًا لاستخدام `RENDER_EXTERNAL_URL`.
 
-   إن لم يكن لديك ملف Firebase CLI config، أضف محتوى `firestore.indexes.json` إلى ملف إعدادات الفهارس الموجود في مشروعك، ولا تستبدل إعدادات أخرى دون دمجها.
-
-5. تأكد أن متغيرات Render الحالية مضبوطة، خصوصًا:
-   - `BOT_TOKEN`
-   - `RENDER_EXTERNAL_URL` أو `WEBHOOK_HOST`
-   - `FIREBASE_CREDENTIALS`
-
-6. انشر الخدمة على Render، ثم افتح البوت في الخاص وأرسل:
-
-   ```text
-   /widget
-   ```
-
-   أوامر `/start` والحاسبة القديمة تبقى متاحة. أداة التثبيت تحول Webhook إلى معالج خام يوجّه `widget_query` للمعالج الجديد، ويعيد بقية التحديثات إلى Aiogram.
-
-## اختبار سريع قبل النشر
-
-من جذر الحزمة:
+أمر التشغيل:
 
 ```bash
+uvicorn app.main:app --host 0.0.0.0 --port $PORT
+```
+
+فحص الخدمة: `/health`.
+
+## فهارس Firestore
+
+بعد إضافة ملفي `firebase.json` و`firestore.indexes.json` إلى مشروع Firebase، نفّذ:
+
+```bash
+firebase deploy --only firestore:indexes
+```
+
+## الاختبارات
+
+```bash
+pip install -r requirements-dev.txt
 python -m unittest discover -s tests -v
 ```
 
-لفحص الواجهة وتجربة ضغط الأزرار محليًا افتح `preview.html` في المتصفح؛ هذه معاينة تفاعلية ببيانات تجريبية فقط. ملف `widget.html` هو الذي يرسله البوت إلى Telegram. الاختبار الحقيقي للحساب من خادم Python والحفظ في Firestore يكون بعد تثبيت الحزمة ونشر البوت وإرسال `/widget`.
+الاختبارات تتحقق من حدود جميع شرائح الفردية والفريق، ومعادلات الفوز والخسارة والتعادل، والتحقق من طلبات Widget، وحجم HTML، والصفحات الخاصة بسجل كل مستخدم.
 
-## ملاحظات السجل
+## قيود Telegram Widget
 
-- تستخدم الحزمة مجموعة Firestore الحالية `battles` وحقولها الحالية، وتضع `source: "widget"` للعمليات الجديدة.
-- معرف مستند الحفظ مشتق من `widget_query.id` لمنع تكرار حفظ نفس الطلب إذا أُعيد Webhook.
-- لا تستدعي الحزمة `trim_history()`؛ وتعدّل أداة التثبيت الحفظ القديم أيضًا لإيقاف حذف السجلات بعد ثلاث معارك.
-- صفحة السجل تعرض خمس نتائج في كل مرة، وتحتاج فهارس Firestore الواردة في الملف المرفق.
-- عند غياب `FIREBASE_CREDENTIALS` تعمل الحاسبة، لكن لا يُحفظ السجل.
-- Telegram Widget يعمل حاليًا في الإنتاج داخل المحادثة الخاصة مع البوت فقط. لا تتوقع ظهوره في القروبات أو القنوات في بيئة الإنتاج.
-- HTML لا يتصل بالإنترنت ولا يستخدم CDN أو خطوطًا خارجية، التزامًا ببيئة Widget المعزولة.
+- في بيئة Telegram الإنتاجية الحالية، إرسال Widgets متاح في المحادثات الخاصة مع البوت فقط.
+- يجب أن يظل HTML بحد أقصى 32 KB، وألا يتجاوز 4 KB بعد ضغط zlib بالمستوى 9. يفحص التطبيق هذين الحدين قبل الإرسال.
+- Widget معزول ولا يملك اتصال شبكة. يتواصل مع Python من خلال `TelegramWidget.request()` فقط.
+- لا توجد حقول نص أو لوحة مفاتيح نظام داخل Widget؛ الإدخال عبر الأزرار.
+- لا يمكن استبدال HTML لرسالة Widget موجودة؛ بعد تحديث الواجهة أرسل Widget جديدة.
+- يجب الرد على كل `widget_query` خلال 15 ثانية. يجيب التطبيق أولًا عن الاستعلام بعد تجهيز النتيجة وحفظها بمهلة محددة.
 
-## طريقة التراجع
+## بنية المشروع
 
-أوقف النشر، ثم أعد `main.py.bak` إلى `main.py`. احذف `widget_calculator.py` و`widget.html` إذا لم تعد تحتاجهما. لا تحذف سجلات Firestore.
+```text
+app/
+  __init__.py
+  main.py                 # FastAPI + Telegram webhook
+battle_core.py            # جداول النقاط ومعادلات الحساب
+widget_calculator.py      # بروتوكول Widget وسجل Firestore
+widget.html               # واجهة Telegram Widget الفعلية
+preview.html              # معاينة محلية ببيانات وهمية
+firestore.indexes.json    # فهارس سجل المعارك
+firebase.json
+render.yaml
+requirements.txt
+requirements-dev.txt
+tests/
+  test_app.py
+  test_battle_core.py
+  test_widget.py
+```
 
-## ملفات لا تتضمن أسرارًا
+## الخصوصية والأمان
 
-لا تضع `BOT_TOKEN` أو مفاتيح Firebase أو أي بيانات اعتماد في هذه الحزمة أو المستودع. استخدم متغيرات البيئة في Render.
+- لا ترفع `.env` أو توكن Telegram أو JSON حساب Firebase إلى GitHub.
+- الخادم يأخذ هوية المستخدم من `widget_query.from.id` الذي يرسله Telegram، ولا يثق بأي User ID قادم من HTML.
+- استعلامات Firestore مقيدة بمعرف Telegram للمستخدم.
+- معرف سجل المعركة مشتق من `widget_query.id` لمنع تكرار حفظ نفس الطلب عند إعادة إرسال Webhook.
+- لا توجد سياسة حذف تلقائي؛ المعارك تبقى في Firestore إلى أن تحذفها أنت من قاعدة البيانات.
