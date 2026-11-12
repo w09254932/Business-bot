@@ -78,34 +78,131 @@ def _history_timestamp(value: Any) -> str:
         return "—"
 
 
+
 def get_history_page(db: Any, user_id: int, mode: str = "all", page: int = 0) -> dict[str, Any]:
-    """Return a page of the requesting user's own battles only."""
+    """Fetch the user's battle history, with a fallback when composite indexes are missing."""
     if db is None:
-        return {"kind": "history", "ok": False, "message": "السجل غير مفعّل. أضف إعدادات Firestore أولاً."}
+        return {
+            "kind": "history",
+            "ok": False,
+            "message": "قاعدة التخزين غير متصلة."
+        }
+
+    def make_row(row):
+        def safe_int(value):
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError, OverflowError):
+                return 0
+
+        return {
+            "mode": row.get("mode", "individual"),
+            "result": str(row.get("result", row.get("outcome", "—"))),
+            "mine": safe_int(row.get("my_number", row.get("mine", 0))),
+            "opponent": safe_int(row.get("opp_number", row.get("opponent", 0))),
+            "points": format_number(row.get("my_result", row.get("points", 0))),
+            "date": _history_timestamp(row.get("ts")),
+        }
+
+    def timestamp_key(row):
+        value = row.get("ts")
+        try:
+            if hasattr(value, "timestamp"):
+                return value.timestamp()
+            if isinstance(value, str):
+                return datetime.fromisoformat(
+                    value.replace("Z", "+00:00")
+                ).timestamp()
+            return float(value or 0)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
     try:
-        query = db.collection("battles").where("user_id", "==", int(user_id))
-        if mode != "all":
-            query = query.where("mode", "==", mode)
-        query = query.order_by("ts", direction="DESCENDING")
-        docs = list(query.offset(page * PAGE_SIZE).limit(PAGE_SIZE + 1).stream())
-        has_more = len(docs) > PAGE_SIZE
-        docs = docs[:PAGE_SIZE]
-        rows = []
-        for doc in docs:
-            row = doc.to_dict() or {}
-            rows.append({
-                "mode": row.get("mode", "individual"),
-                "result": str(row.get("result", "—")),
-                "mine": int(row.get("my_number", 0) or 0),
-                "opponent": int(row.get("opp_number", 0) or 0),
-                "points": format_number(row.get("my_result", 0)),
-                "date": _history_timestamp(row.get("ts")),
-            })
-        return {"kind": "history", "ok": True, "rows": rows,
-                "page": page, "has_more": has_more, "mode": mode}
+        base_query = db.collection("battles").where(
+            "user_id", "==", int(user_id)
+        )
+
+        # المحاولة الأولى: جلب سريع باستخدام فهارس Firestore.
+        try:
+            query = base_query
+
+            if mode != "all":
+                query = query.where("mode", "==", mode)
+
+            docs = list(
+                query.order_by(
+                    "ts", direction="DESCENDING"
+                ).offset(page * PAGE_SIZE).limit(PAGE_SIZE + 1).stream()
+            )
+
+            has_more = len(docs) > PAGE_SIZE
+            docs = docs[:PAGE_SIZE]
+
+            rows = [make_row(doc.to_dict() or {}) for doc in docs]
+
+            return {
+                "kind": "history",
+                "ok": True,
+                "rows": rows,
+                "page": page,
+                "has_more": has_more,
+                "mode": mode,
+            }
+
+        except Exception:
+            # المحاولة الثانية: بدون فهرس مركب.
+            LOGGER.warning(
+                "Indexed history query failed; using fallback",
+                exc_info=True
+            )
+
+            docs = list(base_query.stream())
+            records = []
+
+            for doc in docs:
+                row = doc.to_dict() or {}
+
+                if mode != "all" and row.get("mode") != mode:
+                    continue
+
+                records.append(row)
+
+            records.sort(key=timestamp_key, reverse=True)
+
+            start = page * PAGE_SIZE
+            selected = records[start:start + PAGE_SIZE + 1]
+
+            has_more = len(selected) > PAGE_SIZE
+            selected = selected[:PAGE_SIZE]
+
+            rows = [make_row(row) for row in selected]
+
+            LOGGER.info(
+                "History fallback fetched %s records for user %s",
+                len(records),
+                user_id
+            )
+
+            return {
+                "kind": "history",
+                "ok": True,
+                "rows": rows,
+                "page": page,
+                "has_more": has_more,
+                "mode": mode,
+            }
+
     except Exception:
-        LOGGER.exception("Could not read battle history")
-        return {"kind": "history", "ok": False, "message": "تعذّر جلب السجل الآن."}
+        LOGGER.exception(
+            "Could not read battle history for user %s",
+            user_id
+        )
+
+        return {
+            "kind": "history",
+            "ok": False,
+            "message": "تعذّر جلب السجل من التخزين. راجع سجلات Render."
+        }
 
 
 def save_battle_once(db: Any, query_id: str, user: dict, mode: str,
