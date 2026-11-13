@@ -92,7 +92,6 @@ async def send_widget(chat_id: int, client: httpx.AsyncClient) -> bool:
         "chat_id": chat_id,
         "html": html,
         "allow_queries": True,
-        "caption": "⚔️ TR Battle Calculator | حاسبة معركة الشعبية",
     })
     if response.get("ok"):
         return True
